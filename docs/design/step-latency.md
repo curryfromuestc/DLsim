@@ -1,6 +1,6 @@
 # 单步时延
 
-本页定义 StepLatency：给定一个 worker 的并行配置和本次迭代中逐请求的 (new_tokens, past_kv_len) 列表，返回该次前向迭代的时延及其按资源的分解。
+本页定义 StepLatency：给定一个 worker 的并行配置和本次迭代中按 attention DP rank 分组的逐请求 (new_tokens, past_kv_len) 列表，返回该次前向迭代的时延及其按资源的分解。
 
 ## 模型到算子图
 
@@ -38,7 +38,7 @@ MoE 的负载不均衡是实测表的一个键（balanced、power_law_1.01、pow
 t_comm = alpha × 消息数 + 字节数 / L
 ```
 
-alpha 和 L 取决于该通信落在 scale-up 域内还是域外，规则见 [fabric-and-heterogeneity.md](fabric-and-heterogeneity.md)。有实测的系统优先用通信实测表（nccl、custom_allreduce、moe_a2a），其中 moe_a2a 表含 node_num 维度，覆盖多节点 all-to-all。
+alpha 和 L 取决于该通信落在 scale-up 域内还是域外，规则见 [fabric-and-heterogeneity.md](fabric-and-heterogeneity.md)。通信时延以闭式公式为主路径，实测数据用于在其覆盖范围内标定 alpha 和 L：节点内用 AISimulate 的 nccl、custom_allreduce、moe_a2a 表（最多 8 卡，gb300 上 4 卡，全部是单节点），EP8 与 EP16 用 CollectiveX 的 dispatch 与 combine 实测（含 2 节点跨 RDMA 与 4 节点 MNNVL）。EP32 及以上和跨机柜没有实测，只有闭式公式，结果标注为外推。覆盖范围的细节见 [operator-latency.md](operator-latency.md)。
 
 decode 阶段的 EP all-to-all 每步有上百次小消息，每消息延迟对步时延的影响大于峰值带宽；prefill 和 KV 交付受带宽限制。因此 alpha 和 L 必须分开给出。
 
@@ -52,11 +52,11 @@ decode 阶段的 EP all-to-all 每步有上百次小消息，每消息延迟对�
 
 mixed batch 分三部分计价：
 
-非 attention 算子按本次迭代的 token 总数查询，token 总数为 prefill 新 token 数加 decode 请求数乘 (nextn + 1)。
+非 attention 算子按本次迭代的 token 总数查询，token 总数为全部 rank 合计的 prefill 新 token 数加 decode 请求数乘 (nextn + 1)。attention 算子按 rank 分别计价，取各 rank 的最大值。
 
-prefill attention 逐请求计价。请求 i 的新 token 数为 n_i、已缓存前缀为 p_i 时，在 full_s = n_i + p_i 处查询，再乘以 (full_s² − p_i²) / full_s²。
+prefill attention 逐请求计价。请求 i 的新 token 数为 n_i、已缓存前缀为 p_i 时，直接以 (batch, isl = n_i, step = p_i) 查询模块表，第一个模型的所有 attention 表都有 step 这一前缀轴。前缀超出实测范围时走 [operator-latency.md](operator-latency.md) 的序列轴外推规则。(full_s² − p_i²) / full_s² 只是稠密注意力的闭式代价结构，不用于 CSA 与 HCA：它们的增量代价对 n_i 线性，在 n_i 远小于 full_s 时该比例约为线性比例的 2 倍。
 
-decode attention 逐请求计价，使用各请求自己的 past_kv_len。为控制查询次数，past_kv_len 按对数分桶，同桶请求合并为一次带 batch 的查询。
+decode attention 逐请求计价，使用各请求自己的 past_kv_len。为控制查询次数，past_kv_len 按对数分桶，同桶请求合并为一次带 batch 的查询，代表值取桶内 past_kv_len 的均值，因为 decode attention 对 kv_len 近似线性。
 
 这与 AISimulate 用 batch 的平均 ISL 和平均上下文长度的做法不同。AgentX 的上下文长度跨度为 64k 到 900k，逐请求计价是必需的。
 

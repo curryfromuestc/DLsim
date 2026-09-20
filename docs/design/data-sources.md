@@ -41,16 +41,28 @@ curl --noproxy '*' -L -O https://hf-mirror.com/datasets/semianalysisai/cc-traces
 
 | 端点 | 内容 | 状态 |
 | --- | --- | --- |
-| `/api/v1/benchmarks?model=DeepSeek-V4-Pro` | 每个测试点一行 | 已保存 2026-09-19 的快照，896 行，其中 agentic_traces 130 行 |
-| `/api/v1/derived-agentic-metrics` | 规范的 E2E normalized interactivity | 尚未获取 |
-| `/api/v1/agentic-aggregates` | agentic 聚合量 | 尚未获取 |
-| `/api/v1/tco-feed` | 成本假设 | 尚未获取 |
-| `/api/v1/collectivex/*` | 集合通信实测 | 尚未获取，内容未核对 |
-| `/api/v1/request-timeline` | 逐请求时间线 | 尚未获取 |
+| `/api/v1/benchmarks?model=DeepSeek-V4-Pro` | 每个测试点一行 | 2026-09-19 快照 896 行（agentic_traces 130）；2026-09-20 快照 898 行（agentic_traces 132） |
+| `/api/v1/derived-agentic-metrics?ids=` | 规范的 E2E normalized interactivity，p75 与 p90，按 benchmark id 索引，一次最多 200 个 id | 已取 2026-09-20；132 个 agentic id 中返回 126 个，缺的 6 个全是 vr200 |
+| `/api/v1/agentic-aggregates?ids=` | ISL、OSL、kvCacheUtil、prefixCacheHitRate 的分位数，按 id 索引 | 已取 2026-09-20；ISL 与 OSL 全部 132 行有；kvCacheUtil 与 prefixCacheHitRate 只有 vLLM 系的 56 行有（b200 vllm、b300 vllm、gb200 dynamo-vllm、mi355x vllm 与 atom），gb300 没有 |
+| `/api/v1/tco-feed` | 给外部电子表格 TCO 模型用的吞吐前沿：负载 1024x1024 与 8192x1024，interactivity 档 30、50、75、100，每行为 output_tput_per_gpu，没有价格与成本字段 | 已取 2026-09-20；不是成本假设，也不含 AgentX |
+| `/api/v1/collectivex/runs`、`/runs/{runId}` | 集合通信、KV 传输与 host 交换实测，见下节 | 已取 2026-09-20 |
+| `/api/v1/request-timeline?id=` | 一个测试点的逐请求记录：warmup 与 profiling 阶段、ttftMs、tpotMs、isl、osl、worker、来源类型（weka_main、weka_subagent、weka_flat） | 已取 id 440971（gb300 dynamo-trt，conc 4）：543 条，warmup 44、profiling 499，窗口 3,721 s |
 
-快照中 agentic_traces 的点数按硬件：b200 22，b300 27，gb200 7，gb300 27，h200 5，mi355x 36，vr200 6。
+2026-09-20 快照中 agentic_traces 的点数按硬件与框架：b200 24（sglang 12，vllm 12），b300 27（sglang 12，vllm 15），gb200 7（dynamo-vllm），gb300 27（dynamo-sglang 7，dynamo-trt 6，dynamo-vllm 14），h200 5（dynamo-sglang），mi355x 36（atom 10，mori-sglang 7，sglang 7，vllm 12），vr200 6（trt）。比 2026-09-19 多出的 2 行属于 b200。
 
-快照文件在 `traces/inferencex/`。快照按日期命名，不覆盖旧快照。哪些行已被查看过，记录在 [validation.md](validation.md)。
+快照文件在 `traces/inferencex/`。快照按日期命名，不覆盖旧快照。响应体可能是 gzip。哪些行已被查看过，记录在 [validation.md](validation.md)。
+
+## CollectiveX
+
+InferenceX 的集合通信与 KV 传输实测，契约只有 version=1。`/api/v1/collectivex/latest` 返回最近一次 run，当前是只含 swap 的 h100 run，集合通信数据要按 run_id 从 `/runs/{runId}` 取。已保存的 run 在 `traces/inferencex/collectivex_2026-09-20/`：EP 通信 33477867072、33356406487、33476729962、33775738245、33893771034、34432070017、34504491720、34939333022；KV 传输 33412478973；gb300 swap 35156186434。
+
+| 类别 | 内容 | 覆盖 |
+| --- | --- | --- |
+| EP 通信 | DeepSeek-V4-Pro shape 的 dispatch、stage、combine、roundtrip 的 p50 到 p99 时延与 payload_bytes；后端 deepep-v2、nccl-ep、uccl-ep、flashinfer-ep、mori；normal 与 low-latency 模式 | EP8 与 EP16；decode 每 rank 1 到 512 token，prefill 1,024 到 8,192；bf16 与 fp8。gb200、gb300 的 EP16 是 NVL72 域内 4 节点乘 4 卡经 MNNVL；b200、b300、h100、h200、mi355x 的 EP16 是 2 节点乘 8 卡经 RDMA。没有 EP32 及以上，没有跨机柜 |
+| KV 传输 | kv-dsv4 fp8，mooncake 与 nixl，push 与 pull，bulk 与 paged，含时延与 GB/s | ISL 2,048 到 524,288；链路 rdma，gb200 与 gb300 另有 mnnvl |
+| host 交换 | H2D、D2H、D2D，contiguous 与 random 布局，块大小扫描 | payload 到 1 GiB；gb300、h100、h200、mi300x、mi325x |
+
+从中读出的几个量，作为 fabric 与 state-engine 参数的来源：gb300 上 nixl 经 MNNVL 拉取 524,288 token 的 KV（2,945 MB）p50 4.21 ms，约 699 GB/s，经 RDMA 39.7 ms，约 74 GB/s；每 token 的 KV 字节数约 5,620 B；gb300 pinned host 与器件间 1 GiB 传输 p50 9.1 ms，约 117 GB/s，器件内约 980 GB/s，计时含提交与同步。
 
 API 数据的使用条款尚未核对。
 
@@ -69,7 +81,7 @@ API 数据的使用条款尚未核对。
 
 各系统目录下的 README 记录了数据的上游来源。例如 b200_sxm 的 18 张表来自 AIConfigurator 的 commit 915f590680d8a79fe9c39f6f3a9ff13bc267fcce，其中 16 张是逐字节拷贝，2 张 attention 表是合并后的派生表。
 
-该数据中没有 Vera Rubin，也没有任何非 NVIDIA 的加速器。Vera Rubin 的规格需要由用户在 device 配置中给出并注明来源。
+该数据中没有 Vera Rubin；非 NVIDIA 的加速器只有 b60（Intel），且只有 vllm 的 attention、comm、gemm、moe 四张表。通信表全部是单节点，attention 表的上下文覆盖因框架而异，范围见 [operator-latency.md](operator-latency.md)。Vera Rubin 的规格需要由用户在 device 配置中给出并注明来源。
 
 ## 许可证核对项
 

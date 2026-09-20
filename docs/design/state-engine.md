@@ -73,6 +73,8 @@ prefill 池和 decode 池是两组 worker，共用一个时钟。交付的 token
 
 交付时间为 alpha + bytes / L，经过的链路由 fabric 决定，同一链路上的交付排队，并与 EP 通信共享带宽。P/D 分离与 KV offload 可以同时开启。
 
+alpha 与 L 可由 CollectiveX 的 kv-dsv4 传输实测标定，见 [data-sources.md](data-sources.md)：gb300 上 nixl 经 MNNVL 拉取 524,288 token 的 KV（2,945 MB）p50 为 4.21 ms，约 699 GB/s；经 RDMA 为 39.7 ms，约 74 GB/s；mooncake 经 RDMA 为 62.0 ms。实测的每 token KV 字节数约 5,620 B（fp8），用于核对模型描述中的 bytes_per_token。按此量级，254k 上下文每轮整段交付经 MNNVL 约 2 ms，经 RDMA 约 20 ms。
+
 ## 路由
 
 多个 worker 时，请求到 worker 的放置由策略决定：轮转，或 KV 感知。KV 感知策略的代价函数为

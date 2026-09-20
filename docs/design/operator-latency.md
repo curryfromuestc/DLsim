@@ -23,6 +23,10 @@
 
 `kernel_source`、framework 和 version 是数据的一部分，必须保留：同一 shape 在不同框架版本下由不同 kernel 实现。
 
+通信表的覆盖范围（commit 108cb5d）：moe_a2a 的 node_num 列只有 1，ep_size 在 b200、b300、h100、h200 上为 8，在 gb200、gb300 上为 4；nccl 的 num_gpus 最大为 8，gb300 上为 4。该数据集里没有任何跨节点的集合通信实测。跨节点的实测来自 InferenceX 的 CollectiveX，见 [data-sources.md](data-sources.md)：DeepSeek-V4-Pro shape 的 EP dispatch 与 combine，EP8 与 EP16，其中 gb200、gb300 的 EP16 是 NVL72 域内 4 节点乘 4 卡经 MNNVL，b200、b300、h100、h200、mi355x 的 EP16 是 2 节点乘 8 卡经 RDMA。没有 EP32 及以上，没有跨机柜。
+
+attention 表的上下文覆盖因框架而异：TRT-LLM 1.3.0rc23 与 vLLM 0.24.0、0.25.0 的 dsv4_csa 与 dsv4_hca 表，context 覆盖 isl + step ≤ 65,536，generation 覆盖 step ≤ 65,536；SGLang 0.5.14 的同名表覆盖到 1,048,576。AgentX 主 agent 的 ISL 中位为 254,080，因此前两个框架的表对大多数请求不够用，处理规则见实现一。
+
 ## 本仓库的算子表
 
 导入工具把 parquet 转为本仓库自有的二进制表，保留全部键列、`kernel_source`、framework、version，并记录来源仓库的 commit、源文件路径和导入时间。以后自定义器件的性能模型按同一 schema 输出。
@@ -37,7 +41,7 @@ GEMM 以 (n, k) 为站点、m 为曲线轴。已知站点在自身的 m 曲线�
 
 这些规则与 AISimulate 的做法一致，它公布的留一法中位误差可作为我们实现的对照：GEMM 约 3.6% 到 4.9%，context attention 约 2.0%，DSA 约 5.4%；越界时 p90 误差升到 50% 到 110%。
 
-超出实测范围的查询不返回点估计，转入实现二，并标注为外推。
+超出实测范围的查询分两种处理。attention 类算子沿序列轴外推：取同 batch 下实测范围边缘的点 edge，按该算子类别的闭式代价结构缩放，t(query) = t(edge) × SOL(query) / SOL(edge)，来源标注为外推并附上 query 与 edge 的长度比。代价结构由模型描述给出：generation attention 对 kv_len 线性；CSA context 的 indexer 对总上下文线性、top-k 部分为常数；HCA 对 kv_len/128 线性。这条规则在用于 TRT-LLM 与 vLLM 的表之前，先用 SGLang 的表验证，方法见 [validation.md](validation.md) 步骤 2。其他算子超出实测范围时不返回点估计，转入实现二，并标注为外推。
 
 ## 实现二：跨器件缩放分解
 
@@ -69,8 +73,17 @@ a 是随算力缩放的部分，b 是随存储带宽缩放的部分，c 是不�
 | --- | --- |
 | 跨架构时 kernel 选择、分块方式、autotune 结果不同 | a、b、c 不可转移 |
 | 低精度 kernel 的成熟度不同 | 不能把 BF16 的系数用于 FP4。GB300 上同一 GEMM 的实测表明 FP4 的标称算力是 BF16 的 6 倍，大 m 下的实测加速约 3.0 倍 |
-| 参考器件之间 C 与 Bw 高度相关 | a 与 b 不可区分，需要检查设计矩阵的条件数，并在条件数过大时只报告合并后的缩放 |
+| 参考器件之间 C 与 Bw 高度相关 | a 与 b 不可区分，需要检查设计矩阵的条件数，条件数过大时按下面的区间规则输出 |
 | 目标器件的存储层次与参考器件不同（例如没有 HBM） | 有效带宽取决于命中的存储层，需要在 device 配置中给出各层带宽并由调用方指定访问落在哪一层 |
+
+Bw 一列秩亏时的区间规则：只拟合可辨识的部分 t = a/C + k，其中 k = b/Bw_ref + c，Bw_ref 为参考器件的带宽。目标器件的结果按 k 的两种极端分配给出区间，不给点估计：
+
+```
+t_low  = a/C_t + k                        k 全部是 c
+t_high = a/C_t + k × Bw_ref / Bw_t        k 全部是 b/Bw_ref
+```
+
+这一情形在第一个模型上确定发生。有 nvfp4 表的器件是 gb300、b300_sxm、b200_sxm、gb200 和 rtx_pro_6000_server，前四个的存储带宽在 7.7 到 8.0 TB/s 之间，带宽跨度只由 rtx_pro_6000_server 提供（1.79 TB/s GDDR7，sm120，另一个 kernel 族）。FP4 的 GEMM 与 MoE 对带宽不在 8 TB/s 量级的目标器件只输出区间。attention 模块不受影响，dsv4 的 csa 与 hca 表在 h100、h200 和四个 Blackwell 器件上都有，带宽从 3.35 到 8 TB/s。
 
 ## 实现三：闭式 roofline
 
@@ -84,6 +97,8 @@ a 是随算力缩放的部分，b 是随存储带宽缩放的部分，c 是不�
 | MoE | T·K·h·inter·g·2 / ep / tp | 激活与被命中专家的权重 |
 
 时延为 max(计算量 / 算力, 字节数 / 存储带宽)。
+
+表中 context attention 一行是稠密注意力的代价结构。CSA 与 HCA 的代价结构见实现一中的序列轴外推规则，不用 full_s² − prefix²。
 
 ## 已观察到的事实
 

@@ -99,7 +99,7 @@ J_ij = d log y_i / d log x_j        用中心差分, 在解的邻域内
 cost = ( 器件数 × 单价 / 折旧时长 + 功耗 × 电价 × PUE + 互联与机柜成本 ) / 吞吐
 ```
 
-所有系数来自配置。InferenceX 的 `/api/v1/tco-feed` 给出了其公开系统所用的成本假设，可作参照系统一侧的输入；其内容尚未核对，使用前需要先读取并记录快照。
+所有系数来自配置，参照系统一侧也是。InferenceX 的 `/api/v1/tco-feed` 不含成本假设，只是按 interactivity 档给出的吞吐前沿，见 [data-sources.md](data-sources.md)。
 
 ## 输出
 

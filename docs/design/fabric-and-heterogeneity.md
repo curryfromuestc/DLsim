@@ -66,7 +66,7 @@ all-reduce、all-gather 和 reduce-scatter 跨域时按分层算法计价：域�
 | all-to-all | (p−1)/p × n / L | (p−1) × alpha；经交换芯片直达时可配置为常数 |
 | P2P | n / L | alpha |
 
-有实测的系统优先使用通信实测表，闭式公式用于没有实测的互联。AISimulate 的 b200 规格文件给出了一组可作参照的量级：节点内 900 GB/s，节点间 100 GB/s，P2P 延迟 10 µs。其他系统的取值由用户在配置中给出并注明来源。
+闭式公式是主路径，实测数据在其覆盖范围内标定 alpha 与 L，覆盖范围见 [operator-latency.md](operator-latency.md)。CollectiveX 从 EP8 到 EP16 的实测是域溢出规则的直接对照：deepep-v2 low-latency 模式、decode 每 rank 256 token、bf16 时，gb300 上 dispatch 的 p50 从 EP8 的 81 µs 到 NVL72 域内 4 节点 EP16 的 88 µs，b200 上从 EP8 的 81 µs 到 2 节点跨 RDMA EP16 的 292 µs；h200 上 normal 模式从 101 µs 到 855 µs（CollectiveX run 33477867072 与 33356406487）。AISimulate 的 b200 规格文件给出了一组可作参照的量级：节点内 900 GB/s，节点间 100 GB/s，P2P 延迟 10 µs。host 链路的量级可参照 CollectiveX 的 swap_blocks：gb300 上 pinned host 与器件之间 1 GiB 传输的 p50 为 9.1 ms，约 117 GB/s，器件内拷贝约 980 GB/s，计时含提交与同步。其他系统的取值由用户在配置中给出并注明来源。
 
 ## 链路共享
 
@@ -78,7 +78,7 @@ all-reduce、all-gather 和 reduce-scatter 跨域时按分层算法计价：域�
 
 ## 多机柜
 
-InferenceX 公开的 AgentX 部署最大为 60 个 GPU，没有超出单个 NVL72 域的点，因此多机柜路径没有系统级的对照数据。可用的对照只有算子级的 moe_a2a 实测表（含 node_num 维度）。多机柜结果一律标注为未经系统级验证。
+InferenceX 公开的 AgentX 部署最大为 60 个 GPU，没有超出单个 NVL72 域的点，因此多机柜路径没有系统级的对照数据。算子级的对照只有 CollectiveX 的 2 节点跨 RDMA EP16 行，AISimulate 的 moe_a2a 表全部是单节点，跨机柜没有任何实测。多机柜结果一律标注为未经系统级验证。
 
 多机柜在两种情形下是必需的输入：scale-up 域规模 S 小于一个部署所需的器件数；需要的 KV 容量超过一个域内全部器件的存储。第二种情形对主存容量大而算力小的器件尤其相关。
 

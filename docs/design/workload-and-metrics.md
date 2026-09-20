@@ -87,7 +87,7 @@ E2E normalized interactivity_q = 1 / percentile_q({ r_i })
 
 dashboard 默认取 P90。它近似等于 1 / (TPOT + TTFT/OSL)，即在 decode 速率上加入了排队和 prefill 的惩罚。AgentX 的 OSL 中位只有约 600，TTFT 为数秒，因此 TTFT/OSL 一项与 TPOT 同量级，prefill 和排队对该指标的影响不可忽略。
 
-公开 API 的 `benchmarks` 行里的 `p90_intvty` 是另一个量，等于 1 / P90(ITL)，只反映 decode。两者不能混用。规范指标由 `/api/v1/derived-agentic-metrics` 给出。
+公开 API 的 `benchmarks` 行里的 `p90_intvty` 是另一个量，等于 1 / P90(ITL)，只反映 decode。两者不能混用。规范指标由 `/api/v1/derived-agentic-metrics` 给出，含 p75 与 p90；VR200 的点没有该值。
 
 DLsim 同时输出这两个量，并逐请求保存 TTFT、ITL、E2EL、OSL，分位数由逐请求数据精确计算。
 

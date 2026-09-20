@@ -21,7 +21,7 @@ AgentX trace
 | 接口 | 调用方 | 输入 | 输出 |
 | --- | --- | --- | --- |
 | OpLatencySource | 单步时延层 | 器件、算子类别、dtype、shape | 时延、来源标注、不确定度 |
-| StepLatency | 状态层 | worker 的并行配置，逐请求的 (new_tokens, past_kv_len) 列表 | 本次迭代的时延及其按资源的分解 |
+| StepLatency | 状态层 | worker 的并行配置，按 attention DP rank 分组的逐请求 (new_tokens, past_kv_len) 列表 | 本次迭代的时延及其按资源的分解 |
 | Simulation | 反向求解、sweep | 四类配置与 trace | InferenceX 行与按资源的时间占比 |
 
 OpLatencySource 有三种实现：实测表、跨器件缩放分解、闭式 roofline。以后自定义器件的周期级性能模型输出以第一种实现的数据格式接入。
