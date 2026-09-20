@@ -1,0 +1,16 @@
+[submodule "third_party/agentx-harness"]
+	path = third_party/agentx-harness
+	url = https://github.com/SemiAnalysisAI/agentx-harness.git
+	shallow = true
+[submodule "third_party/inferencex"]
+	path = third_party/inferencex
+	url = https://github.com/SemiAnalysisAI/InferenceX.git
+	shallow = true
+[submodule "third_party/aisimulate"]
+	path = third_party/aisimulate
+	url = https://github.com/ai-dynamo/aisimulate.git
+	shallow = true
+[submodule "third_party/dynamo"]
+	path = third_party/dynamo
+	url = https://github.com/ai-dynamo/dynamo.git
+	shallow = true
