@@ -25,7 +25,7 @@
 
 通信表的覆盖范围（commit 108cb5d）：moe_a2a 的 node_num 列只有 1，ep_size 在 b200、b300、h100、h200 上为 8，在 gb200、gb300 上为 4；nccl 的 num_gpus 最大为 8，gb300 上为 4。该数据集里没有任何跨节点的集合通信实测。跨节点的实测来自 InferenceX 的 CollectiveX，见 [data-sources.md](data-sources.md)：DeepSeek-V4-Pro shape 的 EP dispatch 与 combine，EP8 与 EP16，其中 gb200、gb300 的 EP16 是 NVL72 域内 4 节点乘 4 卡经 MNNVL，b200、b300、h100、h200、mi355x 的 EP16 是 2 节点乘 8 卡经 RDMA。没有 EP32 及以上，没有跨机柜。
 
-attention 表的上下文覆盖因框架而异：TRT-LLM 1.3.0rc23 与 vLLM 0.24.0、0.25.0 的 dsv4_csa 与 dsv4_hca 表，context 覆盖 isl + step ≤ 65,536，generation 覆盖 step ≤ 65,536；SGLang 0.5.14 的同名表覆盖到 1,048,576。AgentX 主 agent 的 ISL 中位为 254,080，因此前两个框架的表对大多数请求不够用，处理规则见实现一。
+attention 表的上下文覆盖因框架而异：TRT-LLM 1.3.0rc23 与 vLLM 0.24.0、0.25.0 的 dsv4_csa 与 dsv4_hca 表，context 覆盖 isl + step ≤ 65,536，generation 只有 batch ≤ 8 的网格线覆盖到 step 65,536，batch 16 到 32,768，batch 32 与 64 到 16,384，batch 128 到 6,144；SGLang 0.5.14 的同名表覆盖到 1,048,576。AgentX 主 agent 的 ISL 中位为 254,080，因此前两个框架的表对大多数请求不够用，处理规则见实现一。
 
 ## 本仓库的算子表
 
@@ -41,7 +41,13 @@ GEMM 以 (n, k) 为站点、m 为曲线轴。已知站点在自身的 m 曲线�
 
 这些规则与 AISimulate 的做法一致，它公布的留一法中位误差可作为我们实现的对照：GEMM 约 3.6% 到 4.9%，context attention 约 2.0%，DSA 约 5.4%；越界时 p90 误差升到 50% 到 110%。
 
-超出实测范围的查询分两种处理。attention 类算子沿序列轴外推：取同 batch 下实测范围边缘的点 edge，按该算子类别的闭式代价结构缩放，t(query) = t(edge) × SOL(query) / SOL(edge)，来源标注为外推并附上 query 与 edge 的长度比。代价结构由模型描述给出：generation attention 对 kv_len 线性；CSA context 的 indexer 对总上下文线性、top-k 部分为常数；HCA 对 kv_len/128 线性。这条规则在用于 TRT-LLM 与 vLLM 的表之前，先用 SGLang 的表验证，方法见 [validation.md](validation.md) 步骤 2。其他算子超出实测范围时不返回点估计，转入实现二，并标注为外推。
+查询按 (器件, 框架, 版本, 表) 定位。框架来自 stack 配置；版本由 device 配置的 `versions` 表按框架给出（例如 gb300 为 trtllm 1.3.0rc23、sglang 0.5.14、vllm 0.25.0），没有给出时取该表的最新版本并在来源说明中标注。模块表的分类键按框架不同：trtllm 与 vllm 的 dsv4 模块表用 `model=sgl-project/DeepSeek-V4-Pro-FP8`、`kv_cache_dtype=fp8`，sglang 0.5.14 用 `model=deepseek-ai/DeepSeek-V4-Pro`、`kv_cache_dtype=fp8_e4m3`，由模型描述按框架填写。
+
+`kernel_source` 是框架按尺寸分派的 kernel 车道（例如 trtllm 的 mhc pre 在 64 token 以下走 fma、中段走 splitk、3072 以上走 dg_nosplit），查询不指定它时按车道分别查询并取最快的可解析结果；没有车道能单独包住查询点时，把各车道合并为一张表插值。来源说明记录所用规则。
+
+超出实测范围的查询分三种处理。attention 类算子沿序列轴外推，分两级。第一级是跨网格线的比例外推：查询所在的网格线（generation 表按 batch 分线，context 表按 isl 分线）在 step 边缘 s_e 处截止时，取同一表中 step 覆盖最长的另一条线作为参照，value = t(line, s_e) × t(ref, c) / t(ref, s_e)，即用参照线在 s_e 之外的形状按 s_e 处的比值缩放到本线；参照线自身超出覆盖的部分再按第二级处理。这样做的原因是 generation 表的截止随 batch 变短，而截止前最后两点的斜率不会延续：trtllm 表 batch 128 线在 3,072 到 6,144 之间上升的斜率若直接外延，120,000 处会给出 3.1 ms，是 batch 8 线在同一处实测值的 16 倍；按比例外推为 0.23 ms。第二级在没有更长的参照线时使用：在同一条网格线上取实测范围边缘的点 edge 和它下方不高于其一半处的第二个点，以两点的斜率线性外延，slope 取非负；来源标注为外推并附上 query 与 edge 的 isl + step 之比、边缘时延、斜率与常数部分。选取第二个点时要求间距不小于一半，因为 trtllm 与 vllm 的网格在 65,536 之前用 64000、64512、65024 这样的密集填充点，跨几百个 token 取斜率只会放大噪声。查询的 batch 或 isl 不在网格上时，先在各自的网格线上外推，再对外层轴插值。代价结构由模型描述给出：generation attention 对 kv_len 线性；CSA context 的 indexer 对总上下文线性、top-k 部分为常数；HCA 对 kv_len/128 线性；把它们理解为"线性部分加常数部分"，而不是与 kv_len 成正比，后者在 SGLang 的截断验证中误差为 2.5 到 5 倍。两级规则的验证都用 SGLang 0.5.14 的 gb300 表（`dlsim-perfdata-report extrap`，报告在 `perfdata/reports/`）：uniform 模式把四张表统一截断到 65,536，只有第二级起作用，超出部分的相对误差中位与 p90 为 csa context 9.9% 与 54%、hca context 2.6% 与 40%、csa generation 69% 与 135%、hca generation 2.9% 与 12%；ragged 模式按 trtllm 网格的形状截断 generation 表（batch ≤ 2 保留全部，batch 4 到 65,536，batch 8 到 16,384，batch ≥ 16 到 6,144），第一级对全部 256 个超出行起作用，csa generation 1.4% 与 6.9%、hca generation 1.5% 与 6.2%，query/edge 比覆盖到 8。第一级不用于 context 表：留一验证中 csa context 表用本线斜率的误差中位 1.3%，改用跨线比例为 1.9%。token 轴（`num_tokens`、`m`、`message_size`）超出网格上界时算子处于吞吐受限区，按最后两个网格点的斜率线性外延，来源标注为外推；GEMM 在站点的 m 曲线上同样处理。低于网格下界不返回点估计。其他轴越界时不返回点估计，转入实现二，并标注为外推。
+
+另外两条数据事实影响查询：`moe_a2a` 表的 latency 列单位是微秒（AISimulate 读入时除以 1000），导入工具把它换算为毫秒，其余表都是毫秒；gb300 的 trtllm 1.3.0rc23 MoE 表在 DSV4 的 shape (7168, 3072, top-6, 384) 上只有 `w4a8_mxfp4_mxfp8`，`nvfp4` 只在 vllm 0.25.0 有，因此单步时延层在 `moe_dtype` 无行时按 w4a8_mxfp4_mxfp8、fp8_block、fp8 的顺序退化，并在来源说明中记录所用的 dtype；moe_a2a 的 dispatch 在 trtllm_deepep_ht 下只有 bfloat16 与 nvfp4 的 payload，comm_dtype 同样退化。
 
 ## 实现二：跨器件缩放分解
 

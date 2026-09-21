@@ -1,0 +1,11 @@
+# Frozen stack calibration per framework x deployment curve (docs/design/validation.md 冻结清单).
+# Each entry was fitted on the lowest-concurrency gb300 point of its curve with `dlsim calibrate`
+# (objective: mean |log(1+err)| over tput_per_gpu, p90_e2e_norm_intvty, median_ttft, p90_intvty).
+# gen_points.py matches a point on framework family + disagg, exact decode_tp first, and writes the three
+# values into the point's stack_overrides. Layer-3 systems (b200, b300, gb200, h200) reuse these values.
+- {framework: trt, disagg: true, anchor: 440971, t_step_fixed_ms: 3.0, mtp_accept_mean: 2.0, request_overhead_ms: 600}
+- {framework: sglang, disagg: false, anchor: 441368, t_step_fixed_ms: 0.0, mtp_accept_mean: 4.5, request_overhead_ms: 600}
+- {framework: vllm, disagg: false, decode_tp: 8, anchor: 439877, t_step_fixed_ms: 4.0, mtp_accept_mean: 2.5, request_overhead_ms: 600}
+- {framework: vllm, disagg: false, decode_tp: 4, anchor: 440200, t_step_fixed_ms: 4.0, mtp_accept_mean: 2.5, request_overhead_ms: 600}
+- {framework: vllm, disagg: true, anchor: 440280, t_step_fixed_ms: 0.0, mtp_accept_mean: 1.5, request_overhead_ms: 1200}
+- {framework: sglang, disagg: true, anchor: 441365, t_step_fixed_ms: 0.0, mtp_accept_mean: 4.5, request_overhead_ms: 600}

@@ -30,9 +30,11 @@ FP4 的实测只存在于 Blackwell 系列，可用的参考器件数少于 BF16
 
 InferenceX 快照中 GB300 在 AgentX 上有 27 个点，分属 dynamo-trt（6）、dynamo-sglang（7）、dynamo-vllm（14）三个框架和多种拓扑。器件的算子时延全部来自实测表，因此这一层的误差来自单步组合、调度、缓存和通信模型。
 
-stack 配置中不能由 recipe 直接读出的参数（每步固定开销、MTP 接受长度）在一部分拓扑上标定，在留出的拓扑上预测整条并发曲线。
+stack 配置中不能由 recipe 直接读出的参数在一部分点上标定，在留出的点上预测整条并发曲线。这些参数有三个，都是每个框架自己的常量：每步固定开销 t_step_fixed_ms、MTP 平均接受长度 mtp_accept_mean、每请求流水线开销 request_overhead_ms。第三个参数来自 gb300 dynamo-trt 并发 4 的 request-timeline：profiling 请求的 TTFT 有约 0.6 s 的下限，与新 token 数无关，随新 token 数约 0.1 ms/token 增长，随上下文长度约 0.5 µs/token 增长；模拟器的 prefill 计算复现了第二项，前两项之外没有对应物。
 
-标定顺序：先用 dynamo-sglang 的 7 个点，其 attention 查询全部落在 SGLang 0.5.14 表的实测范围内；dynamo-trt 的 6 个点和 dynamo-vllm 的 14 个点同时检验序列轴外推规则和各自框架的 stack 参数。agentic-aggregates 的 prefixCacheHitRate 只有 vLLM 系的行有，dynamo-vllm 的 14 个点可以用它直接核对缓存模型的命中率。
+划分规则：按框架和部署方式（聚合或 P/D 分离）把 27 个点分成曲线，每条曲线并发最低的一个点用于标定，其余点留出。dynamo-trt 分离曲线标定 440971（并发 4），留出 440974、440973、440972、440970、440975（并发 24、388、736、1152、2626）；dynamo-sglang 聚合曲线标定 441368（并发 1），留出 441364、441362（并发 4、8）；dynamo-sglang 分离曲线标定 441365（并发 480），留出 441367、441363、441366（并发 960、1440、1920）；dynamo-vllm 聚合 tp8 曲线标定 439877（并发 1），留出 439878、439875（并发 4、8）；dynamo-vllm 聚合 tp4 曲线标定 440200（并发 1），留出 440199、440201、440202（并发 2、4、6）；dynamo-vllm 分离曲线标定 440280（并发 4），留出 440282、439873、440279、440278、439876、439874（并发 128、256、256、512、1024、1152）。留出点检验的是并发曲线的形状：排队、批组成、缓存命中和通信随并发的变化。agentic-aggregates 的 prefixCacheHitRate 只有 vLLM 系的行有，dynamo-vllm 的点可以用它直接核对缓存模型的命中率。
+
+原先的计划是用 dynamo-sglang 的 7 个点标定、把 dynamo-trt 与 dynamo-vllm 全部留出。改为按曲线划分的原因是三个框架的固定开销互不相同，从一个框架标定的常量不能套到另一个框架。dynamo-trt 的 440971、440973、440972 三行在实现重放协议时被逐项对照过（见数据查看记录），这三个点的曲线形状在划分确定前已被看到；这一点作为泄漏记录，不改变划分。
 
 ### 第三层：系统级跨器件
 
@@ -49,16 +51,42 @@ stack 配置中不能由 recipe 直接读出的参数（每步固定开销、MTP
 | B300、H200 的行 | 曾在探索阶段整体打印过，未逐点分析；第三层使用时注明部分泄漏 |
 | B200、GB200 的行 | 只统计过数量 |
 | MI355X 的 36 个点 | 只统计过数量；没有该器件的算子数据，kernel 族与参考器件不同，不满足缩放分解的适用条件，只作诊断 |
-| 2026-09-20 快照（benchmarks、derived-agentic-metrics、agentic-aggregates） | 只统计过数量；数值只查看了 gb300 dynamo-trt 的一行（id 440971） |
-| request-timeline id 440971 | 查看了字段结构和一条 warmup 请求的样本值，未分析 |
+| 2026-09-20 快照（benchmarks、derived-agentic-metrics、agentic-aggregates） | 只统计过数量；数值逐项对照过 gb300 dynamo-trt 的三行（440971、440973、440972），用于重放协议与缓存路由的调试；其余 gb300 行只在标定与留出运行中以误差汇总的形式查看 |
+| gb300 六个锚点 441368、439877、440200、440280、441365、440971 与留出点 440973 的完整行 | 标定与调试期间逐项对照过（440973 用于定位 decode 准入顺序、首 token 时刻与 attention 分桶三处引擎错误） |
+| request-timeline id 440971 | 已分析：profiling 请求的 TTFT 按上下文长度分桶、对新 token 数与上下文长度回归、TPOT 按分桶查看，用于引入 request_overhead_ms 并确认 ITL 的每请求平均口径 |
 
 VR200 不能作为验收对象还有三个与泄漏无关的原因：公开的 VR200 点 offload 关闭而拓扑相同的 GB300 点 offload 开启；两者的并发数不同；derived-agentic-metrics 对 6 个 VR200 点没有返回值，规范指标无法比较。在拓扑相同的两组点上，VR200 与 GB300 的 ITL 口径 interactivity 之比为 1.83 和 1.90，这一数字只能用于检查 DLsim 的预测方向和量级。
 
 ## 冻结清单
 
+标定得到的参数按曲线记录在 `configs/calibration.yaml`，键为框架族（去掉 dynamo- 前缀）、是否分离、decode 侧 TP（可选）和锚点 id；`tools/reference/gen_points.py` 生成每个点时按该键匹配（先精确匹配 decode TP，再只按框架族与分离匹配），把 t_step_fixed_ms、mtp_accept_mean、request_overhead_ms 写入该点的 stack_overrides，并记录 calibration_anchor。第三层的 b200、b300、gb200、h200 点没有自己的锚点，按同样的规则沿用 gb300 的值。
+
 第二层的留出部分和第三层在运行前，先向仓库提交一份清单，内容为：全部配置文件的路径、标定得到的参数值、参与比较的点的标识、误差的定义和接受条件。比较结果在其后的提交中加入。两次提交在 git 历史中的先后顺序就是冻结的证据。
 
 冻结之后如果修改了模型再重跑，结果必须标注为冻结后修订，并保留修订前的结果。
+
+### 清单（2026-09-21）
+
+配置文件：`configs/calibration.yaml`，`configs/stack/{dynamo-trt,dynamo-sglang,dynamo-vllm,sglang,vllm}.yaml`，`configs/device/{gb300,gb200,b300,b200,h200}.yaml`，`configs/fabric/{nvl72,nvl8_ib}.yaml`，`configs/points/*.yaml`（90 个，由 `tools/reference/gen_points.py` 从快照、recipe 和 calibration.yaml 生成）。数据：InferenceX 快照 2026-09-20（benchmarks、derived-agentic-metrics），算子表来自 aisimulate 提交 108cb5d，agentx-harness 提交 56a0cf7，inferencex 提交 8d70414d，重放协议参数 seed 42、时长 3600 s、每 lane warmup 10、树空闲封顶 300 s、系统空闲封顶 10 s。
+
+标定参数（每条曲线在其最低并发点上用 `dlsim calibrate` 网格取目标函数最小的格点；目标函数为四个指标 |log(1+误差)| 的平均）：
+
+| 曲线 | 锚点 | t_step_fixed_ms | mtp_accept_mean | request_overhead_ms | 锚点残差（吞吐 / P90 E2E 归一化 / TTFT 中位 / P90 intvty） |
+| --- | --- | --- | --- | --- | --- |
+| trt 分离 | 440971 (c4) | 3.0 | 2.0 | 600 | +5% / +3% / +6% / −8% |
+| sglang 聚合 | 441368 (c1) | 0.0 | 4.5 | 600 | −12% / −9% / +25% / −5% |
+| vllm 聚合 tp8 | 439877 (c1) | 4.0 | 2.5 | 600 | −12% / +83% / +18% / −1% |
+| vllm 聚合 tp4 | 440200 (c1) | 4.0 | 2.5 | 600 | −4% / +44% / +35% / 0% |
+| vllm 分离 | 440280 (c4) | 0.0 | 1.5 | 1200 | +5% / +53% / −14% / −1% |
+| sglang 分离 | 441365 (c480) | 0.0 | 4.5 | 600 | +49% / +140% / −58% / −18% |
+
+网格：trt 分离 fixed {0,1,2,3,4} × accept {2,2.5,3} × overhead {300,600,900}（45 格）；sglang 聚合 fixed {0,2,4} × accept {2.5,3.5,4.5,5.5} × overhead {300,600,900}（36 格）；vllm 聚合两条曲线 fixed {0,2,4} × accept {1.5,2,2.5,3} × overhead {300,600,900}（各 36 格）；vllm 分离同前两轴 × overhead {300,600,900,1200}（48 格）；sglang 分离 fixed {0,2} × accept {3.5,4.5} × overhead {300,600}（8 格，c480 每格约 20 分钟）。sglang 分离的 fixed 2 / accept 4.5 / overhead 600 一格在冻结前触发了引擎活锁：前缀完整命中退一块到父节点后，h.lower 仍沿用已下沉到 host 的单块叶节点的判断，调度了零字节、零时长的加载，加载完成后再次准入回到同一状态。修复（退到父节点后按父节点的链重算 h.lower，回归测试 test_full_hit_on_offloaded_leaf）不改变任何未卡死的模拟结果；该格补跑后目标函数 0.586，选定格点（0.582）不变。
+
+第二层留出点（gb300，21 个）：441362、441363、441364、441366、441367、440970、440972、440973、440974、440975、439873、439874、439875、439876、439878、440199、440201、440202、440278、440279、440282。其中 440973 在冻结前为调试重放协议、decode 准入和 attention 计价被逐项看过，其结果只作参考，不计入第二层的中位误差。
+
+第三层（63 个）：b200 24 个（442268–442279、442734–442745）、b300 27 个（442080–442091、439516–439526、440195–440198）、gb200 7 个（439969–439975）、h200 5 个（442202–442206），沿用上表的参数。
+
+误差按下节定义，接受条件取下节表中的建议值。冻结前已知且不再调参的偏差：vllm 聚合锚点的 TTFT 尾部偏短（recipe 里 VLLM_PREFIX_CACHE_RETENTION_INTERVAL=32768 的稀疏前缀保留会让部分回合重算，未建模）；sglang 分离 c480 的实测 TTFT 中位 17.7 s 远高于模型的 4.6 s，实测系统里存在模型没有的排队来源。
 
 ## 误差定义
 

@@ -48,14 +48,14 @@ mapping 把每个并行组放到具体的器件上。一个集合通信的计价
 
 并行组完全落在一个 scale-up 域内时，使用 alpha_up 和 L_up。
 
-并行组跨 k 个域、每域 g 个器件、总规模 p = k·g 时，均匀 all-to-all 中每个器件发出的数据有 (p − g)/p 的比例离开本域。计价为
+并行组跨 k 个域、每域 g 个器件、总规模 p = k·g 时，均匀 all-to-all 中每个器件发出的数据有 (p − g)/p 的比例离开本域，留在域内的比例为 (g − 1)/p。消息数按目的器件数计：跨域 p − g 条，域内 g − 1 条；延迟项按上表的规则取常数或串行。计价为
 
 ```
 t = alpha_out × 跨域消息数 + alpha_up × 域内消息数
     + max( 域内字节 / L_up , 跨域字节 / (L_out / r) )
 ```
 
-all-reduce、all-gather 和 reduce-scatter 跨域时按分层算法计价：域内 reduce-scatter，跨域 all-reduce，域内 all-gather，三段相加。
+all-reduce 跨域时按分层算法计价：域内 reduce-scatter，跨域 all-reduce，域内 all-gather，三段相加。all-gather 与 reduce-scatter 跨域时取其中对应的两段，跨域段按 all-reduce 跨域段的一半字节计。这是粗略近似；第一阶段的 attention DP 组都落在单个域内，该路径不被 InferenceX 的点触发。
 
 闭式的集合通信代价（p 为组规模，n 为每器件的消息字节数）：
 
@@ -63,10 +63,10 @@ all-reduce、all-gather 和 reduce-scatter 跨域时按分层算法计价：域�
 | --- | --- | --- |
 | all-reduce（ring） | 2(p−1)/p × n / L | 2(p−1) × alpha |
 | all-gather、reduce-scatter | (p−1)/p × n / L | (p−1) × alpha |
-| all-to-all | (p−1)/p × n / L | (p−1) × alpha；经交换芯片直达时可配置为常数 |
+| all-to-all | (p−1)/p × n / L | 默认 1 × alpha（各目的地并发发出，取所跨最高层的 alpha）；fabric 配置 `alltoall_serial_latency: true` 时为 (p−1) × alpha |
 | P2P | n / L | alpha |
 
-闭式公式是主路径，实测数据在其覆盖范围内标定 alpha 与 L，覆盖范围见 [operator-latency.md](operator-latency.md)。CollectiveX 从 EP8 到 EP16 的实测是域溢出规则的直接对照：deepep-v2 low-latency 模式、decode 每 rank 256 token、bf16 时，gb300 上 dispatch 的 p50 从 EP8 的 81 µs 到 NVL72 域内 4 节点 EP16 的 88 µs，b200 上从 EP8 的 81 µs 到 2 节点跨 RDMA EP16 的 292 µs；h200 上 normal 模式从 101 µs 到 855 µs（CollectiveX run 33477867072 与 33356406487）。AISimulate 的 b200 规格文件给出了一组可作参照的量级：节点内 900 GB/s，节点间 100 GB/s，P2P 延迟 10 µs。host 链路的量级可参照 CollectiveX 的 swap_blocks：gb300 上 pinned host 与器件之间 1 GiB 传输的 p50 为 9.1 ms，约 117 GB/s，器件内拷贝约 980 GB/s，计时含提交与同步。其他系统的取值由用户在配置中给出并注明来源。
+闭式公式是主路径，实测数据在其覆盖范围内标定 alpha 与 L，覆盖范围见 [operator-latency.md](operator-latency.md)。CollectiveX 从 EP8 到 EP16 的实测是域溢出规则的直接对照：deepep-v2 low-latency 模式、decode 每 rank 256 token、bf16 时，gb300 上 dispatch 的 p50 从 EP8 的 81 µs 到 NVL72 域内 4 节点 EP16 的 88 µs，b200 上从 EP8 的 81 µs 到 2 节点跨 RDMA EP16 的 292 µs；h200 上 normal 模式从 101 µs 到 855 µs（CollectiveX run 33477867072 与 33356406487）。同一数据在最小 payload 处 EP8 到 EP16 的延迟只增长 0.97 到 1.42 倍，与 (p − 1) × alpha 的 2.14 倍不符，与常数延迟一致，因此 all-to-all 的延迟项默认取常数。EP8 行反解得到的 scale-up 有效带宽约 500 到 670 GB/s（gb300、b200，deepep-v2），低于 900 GB/s 的标称值；EP16 跨 RDMA 行在大 payload 处反解出的跨节点有效带宽为 45 到 49 GB/s（b200 deepep-v2 low-latency），与规格值 50 GB/s 一致，而 normal 模式各后端为 90 到 125 GB/s，是规格值的 2 倍，说明 L_out 应按后端与模式标定而不是只取规格值。AISimulate 的规格文件给出了可作参照的量级：节点内 900 GB/s，节点间 b200 为 50 GB/s、b300 为 100 GB/s，P2P 延迟 10 µs。host 链路的量级可参照 CollectiveX 的 swap_blocks：gb300 上 pinned host 与器件之间 1 GiB 传输的 p50 为 9.1 ms，约 117 GB/s，器件内拷贝约 980 GB/s，计时含提交与同步。其他系统的取值由用户在配置中给出并注明来源。
 
 ## 链路共享
 

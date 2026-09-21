@@ -1,0 +1,14 @@
+# Source: third_party/aisimulate .../systems/h200_sxm.yaml (commit 108cb5d); host tier over PCIe Gen5 x16 (64 GB/s).
+name: h200_sxm
+flops: {bf16: 989e12, fp8: 1978e12}
+memory:
+  - {name: hbm, capacity_bytes: 151397597184, bandwidth_Bps: 4.8e12, usable_fraction: 0.9}
+  - {name: host, capacity_bytes: 193273528320, bandwidth_Bps: 64e9, usable_fraction: 1.0}
+power_w: 700
+perf_tables: h200_sxm
+framework: sglang
+version: 0.5.14
+versions: {sglang: 0.5.14, vllm: 0.25.0}
+kernel_family: sm90
+activation_reserve_bytes: 3758096384
+comm_reserve_bytes: 411041792

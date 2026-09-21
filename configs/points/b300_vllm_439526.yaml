@@ -1,0 +1,38 @@
+id: 439526
+hardware: b300
+framework: vllm
+precision: fp4
+spec_method: mtp
+offload_mode: on
+is_multinode: false
+num_prefill_gpu_row: 64
+num_decode_gpu_row: 64
+num_prefill_gpu: null
+num_decode_gpu: 8
+device: configs/device/b300.yaml
+fabric: configs/fabric/nvl8_ib.yaml
+stack: configs/stack/vllm.yaml
+recipe: null
+calibration_anchor: 439877
+stack_overrides:
+  max_num_seqs: 128
+  max_num_batched_tokens: 16384
+  mtp_nextn: 3
+  chunk_tokens: 16384
+  t_step_fixed_ms: 4.0
+  mtp_accept_mean: 2.5
+  request_overhead_ms: 600
+mapping:
+  disaggregated: false
+  routing: kv_aware
+  decode:
+    device: b300_sxm
+    workers: 1
+    tp: 1
+    attention_dp: 8
+    moe_tp: 1
+    moe_ep: 8
+run:
+  concurrency: 512
+  duration_s: 3600
+  seed: 42

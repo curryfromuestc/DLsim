@@ -1,0 +1,18 @@
+# InferenceX gb300 dynamo-trt AgentX recipes (disagg-*-mtp): chunked prefill 16384, decode max batch from the recipe
+# name (b1/b4/b8/b32/b96, overridden per point), MTP draft 3, prefill-side per-conversation block reuse, decode-side none,
+# host cache offload. t_step_fixed_ms and mtp_accept_dist are calibration parameters (validation.md layer 2).
+framework: trtllm
+mtp_nextn: 3
+mtp_accept_dist: [0.10, 0.20, 0.30, 0.40]
+chunked_prefill: true
+chunk_tokens: 16384
+mix_prefill_decode: false
+max_num_batched_tokens: 16384
+max_num_seqs: 32
+prefix_cache: true
+prefix_policy: per_conversation
+kv_offload: true
+kv_delivery: full
+graph_replay: true
+t_step_fixed_ms: 0.0
+wide_ep: true

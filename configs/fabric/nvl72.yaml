@@ -1,0 +1,9 @@
+# GB200/GB300 NVL72. scaleup: aisimulate gb300.yaml intra/inter_node_bw 900 GB/s, p2p_latency 10 us.
+# scaleout: gb300.yaml inter_rack_bw 100 GB/s (CX8 XDR), inter_rack_latency 5 us.
+# host: CollectiveX swap_blocks gb300 (117 GB/s at 1 GiB; small-payload p50 14 us).
+scaleup_domain: 72
+scaleup: {alpha_s: 10e-6, bandwidth_Bps: 900e9}
+scaleout: {alpha_s: 5e-6, bandwidth_Bps: 100e9}
+host: {alpha_s: 14e-6, bandwidth_Bps: 117e9}
+devices_per_node: 4
+devices_per_rack: 72

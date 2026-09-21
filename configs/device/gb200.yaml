@@ -1,0 +1,14 @@
+# Source: third_party/aisimulate .../systems/gb200.yaml (commit 108cb5d); host tier as gb300.
+name: gb200
+flops: {fp32: 80e12, bf16: 2500e12, fp8: 5000e12, fp4: 10000e12}
+memory:
+  - {name: hbm, capacity_bytes: 198674743296, bandwidth_Bps: 8.0e12, usable_fraction: 0.9}
+  - {name: host, capacity_bytes: 193273528320, bandwidth_Bps: 117e9, usable_fraction: 1.0}
+power_w: 1200
+perf_tables: gb200
+framework: trtllm
+version: 1.3.0rc23
+versions: {trtllm: 1.3.0rc23, sglang: 0.5.14, vllm: 0.25.0}
+kernel_family: sm100
+activation_reserve_bytes: 3758096384
+comm_reserve_bytes: 411041792

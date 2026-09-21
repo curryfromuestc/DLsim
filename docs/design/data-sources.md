@@ -52,6 +52,12 @@ curl --noproxy '*' -L -O https://hf-mirror.com/datasets/semianalysisai/cc-traces
 
 快照文件在 `traces/inferencex/`。快照按日期命名，不覆盖旧快照。响应体可能是 gzip。哪些行已被查看过，记录在 [validation.md](validation.md)。
 
+## 部署配置的来源
+
+InferenceX 的 `configs/nvidia-master.yaml` 按硬件与框架列出每个 AgentX 部署的拓扑（prefill 与 decode 的 worker 数、tp、ep、dp-attn、并发、投机解码、KV offload）。submodule 钉住的 commit 8d70414 里没有 gb300 dynamo-trt 的 DSV4 条目，主分支有（`dsv4-fp4-gb300-dynamo-trt-agentx`，六个点：并发 4、24、388、736、1152、2626），已把主分支的该文件存为 `traces/inferencex/nvidia-master_main_2026-09-20.yaml`。条目引用的 recipe 文件（`recipes/dsv4/<framework>/gb300-fp4/agentx/*.yaml`）不在公开仓库里，因此 chunk 大小、每 rank 最大 batch 等 stack 参数只能从 recipe 文件名（例如 `disagg-3p1d-dep8-dep16-c1152-b32-mtp`）和文档推断，作为标定参数处理。
+
+每个测试点的 mapping 与 run 配置由 `tools/reference/gen_points.py` 从 benchmarks 快照行的拓扑字段生成到 `configs/points/`，只读拓扑字段，不读指标。引擎限值不在快照里，从产生该行的 InferenceX recipe 读取并写入点文件的 `stack_overrides`：gb300、gb200、h200 的点匹配 `third_party/inferencex/benchmarks/multi_node/srt-slurm-recipes/dsv4/<框架>/<器件>/agentx/*.yaml`（按部署方式、各角色 GPU 数、worker 数和文件名中的并发数匹配，点文件的 `recipe` 字段记录匹配到的文件），取 decode 角色的每 rank 最大序列数与每步 token 预算、prefill 角色的最大序列数与 chunk 大小、MTP 草稿长度（trtllm `max_batch_size`/`max_num_tokens`/`max_draft_len`，sglang `max-running-requests`/`chunked-prefill-size`/`speculative-num-draft-tokens` 减一，vllm `max-num-seqs`/`max-num-batched-tokens`/`num_speculative_tokens`）；b200、b300 的点按 `benchmarks/single_node/agentic/dsv4_fp4_*.sh` 的规则生成（最大序列数为并发的两倍并按 attention DP 分摊，chunk 8192 或 DEP 下的 6144/16384）。这些限值决定曲线的形状：gb300 dynamo-trt 并发 388 的 decode 每 rank 只允许 4 个序列，32 个 rank 共 128 个 decode 槽位，请求在 prefill 完成后等待槽位。行里 `dp_attention` 为真时 tp 字段表示 attention DP 的规模（tp 取 1），否则表示 TP；MoE 的 EP 取 ep 字段。聚合部署的 GPU 数按 worker 数乘每 worker GPU 数计算，与行里按 tp 乘 ep 填充的字段不一致是预期的。
+
 ## CollectiveX
 
 InferenceX 的集合通信与 KV 传输实测，契约只有 version=1。`/api/v1/collectivex/latest` 返回最近一次 run，当前是只含 swap 的 h100 run，集合通信数据要按 run_id 从 `/runs/{runId}` 取。已保存的 run 在 `traces/inferencex/collectivex_2026-09-20/`：EP 通信 33477867072、33356406487、33476729962、33775738245、33893771034、34432070017、34504491720、34939333022；KV 传输 33412478973；gb300 swap 35156186434。
@@ -62,7 +68,9 @@ InferenceX 的集合通信与 KV 传输实测，契约只有 version=1。`/api/v
 | KV 传输 | kv-dsv4 fp8，mooncake 与 nixl，push 与 pull，bulk 与 paged，含时延与 GB/s | ISL 2,048 到 524,288；链路 rdma，gb200 与 gb300 另有 mnnvl |
 | host 交换 | H2D、D2H、D2D，contiguous 与 random 布局，块大小扫描 | payload 到 1 GiB；gb300、h100、h200、mi300x、mi325x |
 
-从中读出的几个量，作为 fabric 与 state-engine 参数的来源：gb300 上 nixl 经 MNNVL 拉取 524,288 token 的 KV（2,945 MB）p50 4.21 ms，约 699 GB/s，经 RDMA 39.7 ms，约 74 GB/s；每 token 的 KV 字节数约 5,620 B；gb300 pinned host 与器件间 1 GiB 传输 p50 9.1 ms，约 117 GB/s，器件内约 980 GB/s，计时含提交与同步。
+EP 通信行的 payload_bytes 是全部 rank 之和，每器件的消息字节 n = payload_bytes / ep；normal 模式按目的 rank 去重，EP8 每 token 62,720 B、EP16 73,472 B，low-latency 模式每 token 86,016 B（7168 × 2 B × top-6）。gb200 与 gb300 的 EP8 行本身也是 2 节点乘 4 卡，位于同一 NVL72 域内。
+
+从中读出的几个量，作为 fabric 与 state-engine 参数的来源：gb300 上 nixl 经 MNNVL 拉取 524,288 token 的 KV（2,945 MB）p50 4.21 ms，约 699 GB/s，经 RDMA 39.7 ms，约 74 GB/s；对 kv-dsv4 fp8 行按 ISL 做线性拟合，每 token 的 KV 字节数为 5,609 B（斜率），另有每序列 4.57 MB 的常数项（61 层滑窗各 128 个条目），与算子图按 585 B 每 KV 条目（576 B 数据加 9 B scale）和 144 B 每 indexer 条目推出的布局一致；gb300 pinned host 与器件间 1 GiB 传输 p50 9.1 ms，约 117 GB/s，器件内约 980 GB/s，计时含提交与同步。
 
 API 数据的使用条款尚未核对。
 

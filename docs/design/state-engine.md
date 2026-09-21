@@ -26,13 +26,15 @@
 
 被展平的并行 agent 由 `hash_ids` 的最长公共前缀证据识别：完全延伸某条链尾部、开始于该尾部区间结束之后、且模型相同的请求是该链的下一轮；只保留尾部前缀的请求，若更长的状态此后不再被访问，视为同一 agent 的上下文压缩，否则是从共享前缀分叉出的新 agent。新链按规则分类为独立 agent、并行 worker 组和辅助调用。这一识别在 subagent 内部嵌套进行。
 
+agentx-harness 加载器还有三条改变图形状的规则，DLsim 按同样的常量实现（`src/trace/weka_graph.cpp` 顶部）：分类阈值，单请求链若跨模型或首请求输入小于 max(16384, 0.10 × 主链峰值 ISL) 归为辅助调用，同模型且输出小于 4000、输入不小于 16384、输入大于 20 倍输出的链为归约调用，也按辅助调用处理；preamble 规则，最早的请求若与其余请求的 hash 没有公共前缀，且输出不超过 64 或块完全不相交，不单独建链而挂回主链；seam 门槛，间隔超过 3600 s 且重叠低于 0.5 的续接不拼接为同一链。全量数据上这些规则产生 7,004 个辅助调用 agent、707 个独立 agent 和 42 个 worker 组。对照结果：393 条 trace 上 DLsim 与 harness 的会话数、每会话请求序列和依赖边（含延迟）完全一致，对照脚本为 `tools/reference/weka_graph_dump.py` 与 `compare_graph_dump.py`。
+
 验收方法是对同一批 trace 比较 DLsim 与 harness 产生的会话数、每个会话的请求序列和依赖边。
 
 ## lane 与运行控制
 
-N 个 lane，每个 lane 同时只有一棵 session 树。树的全部节点结束后，该 lane 取下一条 trace。trace 被重复使用时带 cache-bust，使其前缀与先前的实例不共享。
+N 个 lane，每个 lane 同时只有一棵 session 树。树的全部节点结束后，该 lane 按数据集行序取下一条 trace 从头重放。trace 被重复使用时带 cache-bust，使其前缀与先前的实例不共享。
 
-每棵树从采样的起点 t* 开始。起点之前的请求属于 warmup：它们建立缓存状态，不计入指标。
+初始的每棵树从采样的起点 t* 开始，抽样规则与 warmup 的两段（primer 与 10 个无延迟续接请求）见 [workload-and-metrics.md](workload-and-metrics.md) 的重放语义；起点之前的请求与 warmup 续接请求都不计入指标。每棵树的空闲间隔封顶 300 s，整个系统的空闲间隔封顶 10 s。
 
 ## 调度
 
@@ -61,7 +63,7 @@ attention DP 下可选用一个代表 rank 加顺序统计量修正来替代完�
 t = alpha_tier + bytes / bandwidth_tier
 ```
 
-同一链路上的搬运排队。搬运与计算是否重叠由 stack 配置声明。需要的段正在从下层加载时，请求不被准入。
+同一链路上的搬运排队。搬运与计算是否重叠由 stack 配置声明。需要的段正在从下层加载时，请求不被准入。前缀完整命中时最后一块重算，命中只到它的前一块；被重算的那一块所在的段即使已在下层也不加载，只有命中链上位于下层的段才触发加载。
 
 淘汰策略按层配置，默认 LRU，可附加驻留时长上限。驻留时长是一阶参数：间隔超过驻留时长的轮次需要整段重算。
 
@@ -69,7 +71,7 @@ t = alpha_tier + bytes / bandwidth_tier
 
 ## P/D 分离
 
-prefill 池和 decode 池是两组 worker，共用一个时钟。交付的 token 数可以是完整上下文或目的端缺失的部分，由 stack 配置决定；InferenceX 的 TRT-LLM recipe 中 prefill 侧开启按会话的块复用、decode 侧不复用，对应每轮交付完整上下文（这一点是由配置推断，未经实测验证）。
+prefill 池和 decode 池是两组 worker，共用一个时钟。请求先在 prefill 池计算，交付 KV 后进入 decode rank 的等待队列，decode 每 rank 的序列上限为 stack 的 max_num_seqs（recipe 里 decode 侧每 rank 的 max_batch_size）；每个 pass 先装入正在 decode 的序列，剩余名额才按到达顺序准入等待队列里的请求，已准入的序列不会被新请求挤出。这是 Dynamo 的顺序：router 先发远端 prefill，再把结果路由给 decode worker。客户端由 decode worker 收到流式响应，因此分离部署里首 token 的时间戳打在 decode 准入时刻（prefill 内完成的单 token 请求除外），prefill 之后等待 decode 槽位的时间计入 TTFT 而不是 ITL。gb300 dynamo-trt 并发 388 的点上 decode 每 rank 上限 4、共 128 槽位，实测 TTFT 中位 7.6 s 正是这一排队。交付的 token 数可以是完整上下文或目的端缺失的部分，由 stack 配置决定；InferenceX 的 TRT-LLM recipe 中 prefill 侧开启按会话的块复用、decode 侧不复用，对应每轮交付完整上下文（这一点是由配置推断，未经实测验证）。
 
 交付时间为 alpha + bytes / L，经过的链路由 fabric 决定，同一链路上的交付排队，并与 EP 通信共享带宽。P/D 分离与 KV offload 可以同时开启。
 
@@ -83,7 +85,7 @@ alpha 与 L 可由 CollectiveX 的 kv-dsv4 传输实测标定，见 [data-source
 cost = w_prefill × max(0, 需要 prefill 的块数 − 该 worker 上可复用的块数) + w_decode × 该 worker 的 decode 负载 + w_active × 活跃请求数
 ```
 
-选择代价最小的 worker。session 换 worker 时，已驻留的段需要经链路迁移或重算。
+选择代价最小的 worker。该池关闭了 block reuse 时（InferenceX 的 trtllm decode 池），worker 上没有前缀索引，dynamo-router 靠自己的路由历史和 session 亲和判断局部性：同一棵树的请求固定在它先前请求所在的 worker；新树放到当前存活树最少的 worker，相同时轮转。worker 内有多个 attention DP rank 时，KV 感知策略再选持有最长可复用前缀的 rank，相同时选活跃请求最少的 rank；轮转策略只选活跃请求最少的 rank。session 换 worker 或换 rank 时，已驻留的段重算，不做迁移。InferenceX 的部署都带前缀感知的路由（gb300 上是 dynamo-router），因此 `configs/points` 里的点全部使用 KV 感知策略。
 
 ## 输出
 

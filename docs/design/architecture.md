@@ -33,7 +33,7 @@ OpLatencySource 有三种实现：实测表、跨器件缩放分解、闭式 roo
 | device | 各精度算力、各级存储的容量与带宽、功耗、成本、算子时延数据的引用。允许同时定义多种器件 |
 | fabric | scale-up 域的规模、每器件带宽、每消息延迟；scale-out 的每器件带宽、每消息延迟；机柜边界；host 存储层及其链路 |
 | mapping | 模型的哪个阶段或哪一部分运行在哪个器件组上，组内并行方式（TP、EP、DP attention、PP），worker 数，路由策略 |
-| stack | 软件栈能力：特性开关（MTP、P/D 分离、宽 EP、KV offload、整步 graph 重放、chunked prefill、前缀缓存策略）和每步固定开销 |
+| stack | 软件栈能力：特性开关（MTP、P/D 分离、宽 EP、KV offload、整步 graph 重放、chunked prefill、前缀缓存策略）、每步固定开销和每请求流水线开销 |
 
 stack 与 device 分开，是为了支持三种对比：假设软件栈相同的纯硬件对比，按当前实际软件栈的对比，逐项开关特性的消融。
 

@@ -1,0 +1,8 @@
+# 8-GPU NVLink node with RDMA scale-out. scaleup: aisimulate b200_sxm.yaml intra_node_bw 900 GB/s, p2p_latency 10 us.
+# scaleout: b300_sxm.yaml inter_node_bw 100 GB/s (CX8 800 Gb/s); b200 uses 50 GB/s (CX7).
+# host: PCIe Gen5 x16 64 GB/s.
+scaleup_domain: 8
+scaleup: {alpha_s: 10e-6, bandwidth_Bps: 900e9}
+scaleout: {alpha_s: 10e-6, bandwidth_Bps: 100e9}
+host: {alpha_s: 14e-6, bandwidth_Bps: 64e9}
+devices_per_node: 8

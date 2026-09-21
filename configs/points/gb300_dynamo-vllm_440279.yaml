@@ -1,0 +1,47 @@
+id: 440279
+hardware: gb300
+framework: dynamo-vllm
+precision: fp4
+spec_method: mtp
+offload_mode: on
+is_multinode: true
+num_prefill_gpu_row: 4
+num_decode_gpu_row: 16
+num_prefill_gpu: 4
+num_decode_gpu: 16
+device: configs/device/gb300.yaml
+fabric: configs/fabric/nvl72.yaml
+stack: configs/stack/dynamo-vllm.yaml
+recipe: disagg-1p1d-dep4-dep16-c256-mtp.yaml
+calibration_anchor: 440280
+stack_overrides:
+  max_num_seqs: 8
+  max_num_batched_tokens: 32
+  mtp_nextn: 3
+  prefill_max_seqs: 256
+  prefill_max_tokens: 8192
+  chunk_tokens: 8192
+  t_step_fixed_ms: 0.0
+  mtp_accept_mean: 1.5
+  request_overhead_ms: 1200
+mapping:
+  disaggregated: true
+  routing: kv_aware
+  decode:
+    device: gb300
+    workers: 1
+    tp: 1
+    attention_dp: 16
+    moe_tp: 1
+    moe_ep: 16
+  prefill:
+    device: gb300
+    workers: 1
+    tp: 1
+    attention_dp: 4
+    moe_tp: 1
+    moe_ep: 4
+run:
+  concurrency: 256
+  duration_s: 3600
+  seed: 42

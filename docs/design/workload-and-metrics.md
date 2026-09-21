@@ -29,7 +29,7 @@ AgentX 是 SemiAnalysis 在 InferenceX 中使用的 agentic 推理基准。trace
 | `out` | 输出 token 数 |
 | `hash_ids` | 64 token 粒度的 KV 块标识序列。同一文件内共享一个命名空间。标识是链式前缀哈希：我们在样本上检查了 506,225 次引用，同一标识总是出现在同一位置，因此标识相等意味着前缀相同 |
 | `type` | `s` 为流式，`n` 为非流式，重放时两者处理相同 |
-| `status` | subagent 的结束状态，决定父会话是否等待它 |
+| `status` | subagent 的结束状态，全量数据里只有 `completed`。加载器不读它：父会话是否等待某组 subagent，只由该组的 `t + duration_ms / 1000` 与父会话后续轮次的 `t` 比较决定 |
 
 `ttft` 和 `think_time` 是原始服务侧和客户端侧的记录值。
 
@@ -37,11 +37,11 @@ AgentX 是 SemiAnalysis 在 InferenceX 中使用的 agentic 推理基准。trace
 
 以 agentx-harness 为准，出处见其 `docs/benchmark-modes/semianalysis-agentx-faq.md` 和 `docs/tutorials/weka-trace.md`。DLsim 的状态层必须实现下列语义，结果才可与公开数据比较。
 
-负载由并发数 N 控制，含义是同时存活的 session 树的数量，不是请求到达率。一棵树（根会话及其全部 subagent）全部结束后，该 lane 立即取下一条 trace 作为新的 session。运行固定时长，默认 1800 s，下限 900 s。
+负载由并发数 N 控制，含义是同时存活的 session 树的数量，不是请求到达率。trace 的选取是顺序采样器（Weka 加载器的 preferred sampling strategy 为 SEQUENTIAL，InferenceX 不覆盖）：按数据集行序，lane i 初始取第 i 条；一棵树（根会话及其全部 subagent）全部结束后，该 lane 立即取序列中的下一条 trace 从头重放，序列用完后从第一条循环。运行固定时长，默认 3600 s（InferenceX agentic 矩阵的 DEFAULT_AGENTIC_DURATION_SECONDS），下限 900 s。
 
-轮间延迟取上一轮结束到下一轮开始的间隔，始终生效，单个 session 的间隔默认不封顶。只有当整个重放没有任何活跃或就绪的请求时，所有待发请求的定时器才整体前移，使下一个请求在 10 s 内到达。
+轮间延迟取上一轮结束到下一轮开始的间隔，始终生效。两级空闲封顶：一棵树没有在途请求时，若它最早的待发请求距当前超过 300 s（`--trace-idle-gap-cap-seconds 300`），该树的全部待发定时器整体前移，使最早的一个在 300 s 时到达，请求顺序与依赖不变；整个重放没有任何活跃或就绪的请求时，所有待发定时器整体前移，使下一个请求在 10 s 内到达。
 
-每个 session 从随机采样的起点 t* 开始，范围是全程的 0.0 到 1.0，并有 warmup 阶段发送起点之前的上文，使缓存从一开始就处于稳态占用。指标只统计 profiling 阶段。
+每个初始 lane 的树从采样的起点 t* 开始，范围是树内全部请求开始时刻跨度的 0.25 到 0.75（`--trajectory-start-min-ratio 0.25 --trajectory-start-max-ratio 0.75`）。抽样按 harness 的规则精确复现：seed 取 sha256("42:{trace id}:{lane}") 前 8 字节的大端整数，t* = lo + u·(hi−lo)，u 是 numpy `default_rng(seed).uniform` 的首个值；SeedSequence 与 PCG64 在 `src/engine/harness_rng.cpp` 中重实现，对照值见 `tests/harness_rng_test.cpp`。warmup 分两段：t* 之前每个 agent 的最后一个请求作为 primer 在 t=0 无依赖发出，建立缓存状态；随后每个 lane 按时间顺序取 t* 之后的 10 个请求（`--warmup-requests-per-lane 10`）作为无延迟的 warmup 续接，依赖关系保持；profiling 从其后的状态继续，指标只统计 profiling 阶段。交接规则与 harness 一致：每个 lane 的下一个请求把它在 trace 里的完整轮间延迟带入 profiling，等待全局 warmup 屏障的时间不消耗该延迟；全部 lane 中最早的一个在 profiling 时刻 0 发出，其余保持相对间隔；此时没有在途请求的树立即套用 300 s 的树空闲封顶。lane 结束后取的新树从头重放，不再抽样 t*。
 
 首轮前缀中插入 cache-bust 标记，使被重复使用的 trace 之间不共享缓存。
 
@@ -55,7 +55,7 @@ subagent 不占并发额度。重叠的 subagent 并发发出；父会话的某�
 
 ## 负载特征
 
-下列数字由我们对全量数据的统计得到（数据集自带的 `stats.txt` 给出了同样的计数和 token 总量）。理想命中率一项当时按文件内顺序计算，没有按全局时间顺序，实现后需按上一节的定义重算。
+下列数字由我们对全量数据的统计得到（数据集自带的 `stats.txt` 给出了同样的计数和 token 总量）。理想命中率按上一节的全局时间顺序定义计算，`dlsim trace-stats` 的输出与此一致。
 
 | 量 | 数值 |
 | --- | --- |
@@ -65,7 +65,7 @@ subagent 不占并发额度。重叠的 subagent 并发发出；父会话的某�
 | subagent ISL | p50 64,000；p90 196,326 |
 | 主 agent OSL | p50 616；mean 1,374；p90 3,502 |
 | 每轮实际新增的 prefill token | p50 1,664；mean 3,792；p99 46,722 |
-| 理想前缀命中率 | 0.983 |
+| 理想前缀命中率 | 0.983088 |
 | 实际需计算的 prefill 与输出 token 之比 | 约 3.4 : 1 |
 | 每 session 主轮次数 | p50 65；p90 330 |
 | 轮间间隔 | p50 4.9 s；p90 131.5 s；p99 3,257 s |

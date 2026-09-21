@@ -1,2 +1,4 @@
 /traces/
 /build/
+/perfdata/
+__pycache__/

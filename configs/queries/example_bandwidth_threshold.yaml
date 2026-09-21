@@ -1,0 +1,10 @@
+# Conditional threshold: at the gb300 dynamo-trt 3p1d/dep8-dep16 topology and concurrency 1152, what device memory
+# bandwidth is needed for P90 E2E normalized interactivity >= 60 tok/s, other parameters fixed.
+point: configs/points/gb300_dynamo-trt_440975.yaml
+kind: feasible
+variables:
+  - {name: device.memory.0.bandwidth_Bps, lo: 2.0e12, hi: 20.0e12, log_scale: true}
+targets:
+  - {metric: p90_e2e_norm_intvty, min: 60}
+grid_per_axis: 6
+screen: false

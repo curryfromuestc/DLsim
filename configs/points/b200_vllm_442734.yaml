@@ -1,0 +1,38 @@
+id: 442734
+hardware: b200
+framework: vllm
+precision: fp4
+spec_method: draft_model
+offload_mode: off
+is_multinode: false
+num_prefill_gpu_row: 8
+num_decode_gpu_row: 8
+num_prefill_gpu: null
+num_decode_gpu: 8
+device: configs/device/b200.yaml
+fabric: configs/fabric/nvl8_ib.yaml
+stack: configs/stack/vllm.yaml
+recipe: null
+calibration_anchor: 439877
+stack_overrides:
+  max_num_seqs: 12
+  max_num_batched_tokens: 8192
+  mtp_nextn: 3
+  chunk_tokens: 8192
+  t_step_fixed_ms: 4.0
+  mtp_accept_mean: 2.5
+  request_overhead_ms: 600
+mapping:
+  disaggregated: false
+  routing: kv_aware
+  decode:
+    device: b200_sxm
+    workers: 1
+    tp: 8
+    attention_dp: 1
+    moe_tp: 8
+    moe_ep: 1
+run:
+  concurrency: 6
+  duration_s: 3600
+  seed: 42
