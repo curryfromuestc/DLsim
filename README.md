@@ -45,7 +45,8 @@ dlsim calibrate --ids 440971 [--fixed-ms ...] [--accept-mean ...] [--overhead-ms
                                                                选定值写入 configs/calibration.yaml，再由 gen_points.py 写进各点
 python3 tools/reference/gen_points.py <snapshot.json> configs/points
                                                                从 InferenceX 快照、recipe 与 calibration.yaml 生成部署点
-python3 tools/reference/summarize_validation.py r.json ...     validate-points 报告转成误差表
+python3 tools/reference/summarize_validation.py [--snapshot b.json --derived d.json] r.json ...
+                                                               validate-points 报告转成误差表；给快照时跨硬件配比值对
 DLSIM_PASS_DEBUG=<pool> dlsim sim ...                          每 40 个 pass 打印该池的 batch 与请求状态（诊断）
 dlsim validate-fabric [--out r.json]                           CollectiveX EP8 标定、EP16 预测报告
 dlsim solve --query q.yaml [--out r.json]                      反向求解

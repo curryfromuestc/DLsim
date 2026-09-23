@@ -20,6 +20,7 @@ struct RequestRecord {
   int32_t worker = -1;                 // decode worker (or aggregated worker)
   int32_t prefill_worker = -1;
   bool warmup = false;                 // before t*: builds cache state, excluded from metrics
+  bool failed = false;                 // KV need exceeds the rank pool: never admitted, excluded from metrics
   double arrive_s = 0, admit_s = 0, first_token_s = 0, end_s = 0;
   std::vector<float> itl_ms;           // inter-token latencies after the first token
   int64_t isl = 0, osl = 0;

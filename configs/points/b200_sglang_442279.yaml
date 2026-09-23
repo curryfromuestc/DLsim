@@ -15,6 +15,7 @@ stack: configs/stack/sglang.yaml
 recipe: null
 calibration_anchor: 441368
 stack_overrides:
+  prefill_interval: 24
   max_num_seqs: 32
   chunk_tokens: 6144
   mtp_nextn: 6

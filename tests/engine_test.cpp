@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -539,6 +540,137 @@ void test_full_hit_on_offloaded_leaf() {
   assert(r.extra.at("writebacks") > 0);
 }
 
+// Decode-only turns between prefills push a concurrent prefill's first token out.
+void test_prefill_interval_delays_prefill() {
+  trace::TraceSet ts;
+  TraceBuilder b("gap");
+  b.req(0, 0.0, 0.5, chain({}, 721, 1), 40);
+  b.req(0, 0.0, 0.5, chain({}, 722, 1), 2);
+  ts.traces.push_back(b.t);
+  auto factory = [&](const PoolSpec&) { return std::make_unique<FakeStep>(0.01, 10.0, 0.0, 1.0); };
+  StackSpec st = stack_default();
+  st.mix_prefill_decode = true;
+  st.prefill_interval = 8;
+  st.max_num_seqs = 8;
+  st.max_num_batched_tokens = 64;   // one 64-token prefill per turn, so the second request waits for the next prefill turn
+  st.chunk_tokens = 64;
+  SimResult r = simulate_with(ts, devices(1e7, 1.0), FabricSpec{}, agg(1), st, run_spec(1, 5, 3), factory);
+  double t_long = 1e9, t_other = 1e9;
+  for (const auto& x : r.records) {
+    if (x.first_token_s <= 0) continue;
+    if (x.osl >= 40) t_long = std::min(t_long, x.first_token_s);
+    else t_other = std::min(t_other, x.first_token_s);
+  }
+  std::printf("prefill interval: long %.3f other %.3f\n", t_long, t_other);
+  assert(t_other > t_long + 0.05);
+}
+
+// A request longer than the rank's whole KV pool is failed at admission and the session continues.
+void test_oversized_request() {
+  trace::TraceSet ts;
+  TraceBuilder b("big");
+  int r0 = b.req(0, 0.0, 0.5, chain({}, 701, 10), 2);   // 640 tokens > 500-token pool
+  int r1 = b.req(0, 1.0, 0.5, chain({}, 702, 2), 2);
+  b.edge(r0, r1, trace::EdgeKind::Sequential, 0.2);
+  ts.traces.push_back(b.t);
+  auto factory = [&](const PoolSpec&) { return std::make_unique<FakeStep>(0.01, 1.0, 0.1, 1.0); };
+  SimResult r = simulate_with(ts, devices(500, 1.0), FabricSpec{}, agg(1), stack_default(), run_spec(1, 5, 9), factory);
+  int failed = 0, served = 0;
+  for (const auto& x : r.records) {
+    if (!x.failed && x.end_s <= 0) continue;   // in flight when the run ended (a rejection at t = 0 has end_s 0)
+    (x.failed ? failed : served)++;
+    if (x.failed) assert(x.isl == 640);
+  }
+  std::printf("oversized: failed %d served %d\n", failed, served);
+  assert(failed >= 1 && served >= 1);
+  assert(r.extra.at("oversized_requests") == failed);
+}
+
+// Two chunked prefills fill the pool between them: without preemption neither could take its next chunk.
+void test_prefill_deadlock_preempts() {
+  trace::TraceSet ts;
+  TraceBuilder b("pair");
+  b.req(0, 0.0, 0.5, chain({}, 801, 5), 2);   // 320 tokens each, 500-token pool, 64-token chunks
+  b.req(0, 0.0, 0.5, chain({}, 802, 5), 2);
+  ts.traces.push_back(b.t);
+  auto factory = [&](const PoolSpec&) { return std::make_unique<FakeStep>(0.01, 1.0, 0.1, 1.0); };
+  StackSpec st = stack_default();
+  st.chunked_prefill = true;
+  st.chunk_tokens = 64;
+  SimResult r = simulate_with(ts, devices(500, 1.0), FabricSpec{}, agg(1), st, run_spec(1, 5, 9), factory);
+  int done = 0;
+  for (const auto& x : r.records) if (x.end_s > 0 && !x.failed) done++;
+  std::printf("prefill deadlock: done %d preemptions %.0f\n", done, r.extra.at("preemptions"));
+  assert(done >= 2);
+  assert(r.extra.at("preemptions") > 0);
+}
+
+// A queued request must not pin an idle prefix after admission fails: the running
+// prefill needs to evict that prefix to finish instead of repeatedly recomputing.
+void test_blocked_admission_releases_prefix() {
+  trace::TraceSet ts;
+  TraceBuilder b("blocked-prefix");
+  auto prefix = chain({}, 901, 6);
+  b.req(0, 0.0, 0.5, prefix, 1);
+  b.req(0, 4.0, 0.5, chain({}, 902, 4), 2);
+  b.req(0, 4.2, 0.5, chain(prefix, 901, 1), 2);
+  ts.traces.push_back(b.t);
+  struct BoundedStep : FakeStep {
+    mutable int calls = 0;
+    BoundedStep() : FakeStep(10.0, 1.0, 0.0, 1.0) {}
+    StepResult step(const StepInput& in) const override {
+      assert(++calls < 500);  // This small workload must make progress, including when draining.
+      return FakeStep::step(in);
+    }
+  };
+  auto factory = [&](const PoolSpec&) { return std::make_unique<BoundedStep>(); };
+  StackSpec st = stack_default();
+  st.chunked_prefill = true;
+  st.chunk_tokens = 64;
+  RunSpec run = run_spec(1, 8, 9);
+  run.t_star_min = run.t_star_max = 0;
+  SimResult r = simulate_with(ts, devices(512, 1.0), FabricSpec{}, agg(1), st, run, factory);
+  int completed = 0;
+  for (const auto& x : r.records) if (x.play == 0 && x.end_s > 0 && !x.failed) completed++;
+  assert(completed == 3);
+}
+
+// Loading a host suffix must keep its HBM ancestors resident while making room.
+// A second request is still computing when the reused prefix becomes ready.
+void test_load_under_prefill_pressure() {
+  trace::TraceSet ts;
+  TraceBuilder b("load-pressure");
+  auto prefix = chain({}, 911, 5);
+  auto longer = chain(prefix, 912, 3);
+  b.req(0, 0.0, 0.2, prefix, 1);
+  b.req(0, 1.0, 0.2, longer, 1);
+  b.req(0, 2.0, 0.2, chain({}, 913, 4), 2);
+  b.req(0, 2.14, 0.2, longer, 2);
+  ts.traces.push_back(b.t);
+  DeviceSet ds = devices(640, 1.0);
+  MemoryTier host;
+  host.name = "host";
+  host.capacity_bytes = 1e6;
+  host.usable_fraction = 1.0;
+  ds.devices["dev"].memory.push_back(host);
+  FabricSpec fabric;
+  fabric.host.present = true;
+  fabric.host.alpha_s = 0.01;
+  fabric.host.bandwidth_Bps = 1e8;
+  StackSpec st = stack_default();
+  st.kv_offload = true;
+  st.overlap_bulk = true;
+  st.chunk_tokens = st.max_num_batched_tokens = 64;
+  RunSpec run = run_spec(1, 4, 9);
+  run.t_star_min = run.t_star_max = 0;
+  auto factory = [&](const PoolSpec&) { return std::make_unique<FakeStep>(1.0, 1.0, 0.0, 1.0); };
+  SimResult r = simulate_with(ts, ds, fabric, agg(1), st, run, factory);
+  int completed = 0;
+  for (const auto& x : r.records) if (x.play == 0 && x.end_s > 0 && !x.failed) completed++;
+  assert(completed == 4);
+  assert(r.extra.at("tier_loads") > 0);
+}
+
 void test_scale() {
   trace::TraceSet ts;
   for (int i = 0; i < 16; ++i) {
@@ -603,6 +735,11 @@ int main() {
   test_pd_decode_cap();
   test_offload_and_residency();
   test_full_hit_on_offloaded_leaf();
+  test_prefill_interval_delays_prefill();
+  test_oversized_request();
+  test_prefill_deadlock_preempts();
+  test_blocked_admission_releases_prefix();
+  test_load_under_prefill_pressure();
   test_screen();
   test_scale();
   std::puts("engine_test ok");

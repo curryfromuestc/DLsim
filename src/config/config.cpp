@@ -132,7 +132,7 @@ StackSpec load_stack(const std::string& path) {
   check_keys(n, {"framework", "mtp_nextn", "mtp_accept_dist", "chunked_prefill", "chunk_tokens", "mix_prefill_decode",
                  "max_num_batched_tokens", "max_num_seqs", "prefix_cache", "prefix_policy", "kv_offload",
                  "kv_delivery", "graph_replay", "t_step_fixed_ms", "request_overhead_ms", "prefill_max_seqs", "prefill_max_tokens", "overlap_comm", "overlap_bulk", "eviction",
-                 "residency_limit_s", "moe_distribution", "wide_ep", "preemption"}, path);
+                 "residency_limit_s", "moe_distribution", "wide_ep", "preemption", "prefill_interval"}, path);
   StackSpec s;
   s.framework = get<std::string>(n, "framework", "");
   s.mtp_nextn = get(n, "mtp_nextn", 0);
@@ -142,6 +142,7 @@ StackSpec load_stack(const std::string& path) {
   s.chunked_prefill = get(n, "chunked_prefill", true);
   s.chunk_tokens = get<int64_t>(n, "chunk_tokens", 16384);
   s.mix_prefill_decode = get(n, "mix_prefill_decode", true);
+  s.prefill_interval = get(n, "prefill_interval", 1);
   s.max_num_batched_tokens = get<int64_t>(n, "max_num_batched_tokens", 16384);
   s.max_num_seqs = get(n, "max_num_seqs", 256);
   s.prefix_cache = get(n, "prefix_cache", true);

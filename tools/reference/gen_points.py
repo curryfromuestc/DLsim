@@ -27,7 +27,11 @@ def calibration_for(r, m):
 
 
 def pool(dev, workers, tp, ep, dpa):
-    tp = int(tp or 1); ep = int(ep or 1); workers = int(workers or 1)
+    tp = int(tp or 1); ep = int(ep or 1)
+    # Rows with num_workers 0 (b300 vllm 439516-439526) carry 16 or 64 in num_decode_gpu, but their tput_per_gpu times
+    # duration equals the tokens of a single 4- or 8-GPU worker, so the measurement is one worker; every other row's
+    # tput_per_gpu is normalized by the row's GPU count.
+    workers = int(workers or 1)
     if dpa:
         # attention DP spans the worker's GPUs; rows write that size in tp, some (vllm prefill dep4) leave tp=1 and carry it in ep
         n = max(tp, ep)
@@ -80,9 +84,13 @@ def overrides_for(row, m):
         if fw == "sglang":
             ov = {"max_num_seqs": max(1, 2 * conc // dp), "chunk_tokens": 6144 if (hw == "b200" and dp > 1) else 8192, "mtp_nextn": 6}
             ov["max_num_batched_tokens"] = ov["chunk_tokens"]
+            # dsv4_*_sglang_mtp.sh: DP attention delays prefill (--prefill-decode-interval).
+            if dp > 1: ov["prefill_interval"] = 24 if hw == "b200" else 20
         elif fw == "vllm":
             ov = {"max_num_seqs": max(1, 2 * conc // dp), "max_num_batched_tokens": 16384 if (hw == "b300" and dp > 1) else 8192, "mtp_nextn": 3}
             ov["chunk_tokens"] = ov["max_num_batched_tokens"]
+            # dsv4_*_vllm_mtp.sh: --prefill-schedule-interval 8 on DP attention.
+            if dp > 1: ov["prefill_interval"] = 8
         return ov, None
     sub = recipe_dir.get((hw, fw))
     if not sub:

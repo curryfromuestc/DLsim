@@ -44,12 +44,14 @@ N 个 lane，每个 lane 同时只有一棵 session 树。树的全部节点结�
 | --- | --- |
 | continuous batching | 每次迭代重新组 batch |
 | token 预算 | max_num_batched_tokens、max_num_seqs |
-| chunked prefill | chunk 大小；prefill 与 decode 是否可在同一迭代内混合 |
-| 准入 | 按 KV 可用容量；容量不足时等待 |
+| chunked prefill | chunk 大小；prefill 与 decode 是否可在同一迭代内混合。注意力 DP 上 prefill 不是每次迭代都排：SGLang 的 `--prefill-decode-interval`（B200 为 24，B300 为 20）、vLLM 的 `--prefill-schedule-interval 8`，由点的 `prefill_interval` 表示。有 decode 在跑时，每 N 次迭代才把整份 token 预算给 prefill 一次 |
+| 准入 | 按 KV 可用容量；容量不足时等待。请求的 KV 需求（聚合与 decode 侧为 ISL 加输出长度，分离的 prefill 侧为 ISL）超过该 rank 整个池时永远无法准入：这样的请求直接判为失败并计数（oversized_requests），不进入指标，会话继续；validate-points 里带此计数的点记为容量不足，不参与比较 |
 | 抢占 | 容量不足时按策略回收运行中的请求 |
 | attention DP | 各 rank 各自组 batch，迭代结束时刻取各 rank 的最大值 |
 
 各框架的差异（例如 prefill 优先且不混合的策略）通过 stack 配置的开关表达，参数取自 InferenceX 的 recipe。
+
+请求因容量不足而未能准入时，释放本次查询对前缀缓存的锁定；等待队列不保留尚未使用的缓存。否则排队请求会阻止运行中的请求淘汰缓存，导致抢占后反复重算而无法完成。加载缓存时先保护整条匹配前缀，再检查 HBM 空间，防止腾挪空间时把同一前缀的父节点搬走、增加实际搬回量。加载完成后释放锁定并重新排队，准入时再锁定实际使用的前缀。抢占后重算的输出 KV 长度是已生成 token 数减一，最后一个已输出 token 尚未进入下一次前向计算。
 
 attention DP 下可选用一个代表 rank 加顺序统计量修正来替代完整模拟全部 rank，以减少迭代数；该近似是否采用由验证结果决定。
 

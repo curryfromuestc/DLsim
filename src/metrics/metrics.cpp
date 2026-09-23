@@ -43,7 +43,7 @@ void stats(Metrics& m, const std::string& name, const std::vector<double>& v) {
   m.values["std_" + name] = stddev(v);
 }
 
-bool completed(const RequestRecord& r) { return !r.warmup && (r.end_s > 0 || r.first_token_s > 0); }
+bool completed(const RequestRecord& r) { return !r.warmup && !r.failed && (r.end_s > 0 || r.first_token_s > 0); }
 
 std::string num(double x) {
   char buf[64];

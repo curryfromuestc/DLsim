@@ -73,6 +73,7 @@ struct StackSpec {
   bool chunked_prefill = true;
   int64_t chunk_tokens = 16384;
   bool mix_prefill_decode = true;         // prefill and decode may share an iteration
+  int prefill_interval = 1;               // decode iterations between prefill turns; 1 = every iteration
   int64_t max_num_batched_tokens = 16384;
   int max_num_seqs = 256;
   bool prefix_cache = true;

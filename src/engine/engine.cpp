@@ -117,6 +117,7 @@ struct Unit {
   std::vector<int32_t> running;
   std::deque<int32_t> waiting, dec_waiting;
   int32_t loading = 0;
+  int since_prefill = 0;   // decode iterations since the last prefill turn (prefill_interval)
   int active() const { return int(running.size() + waiting.size() + dec_waiting.size()) + loading; }
 };
 
@@ -290,6 +291,7 @@ class Engine {
   std::string unsupported_note_;
   std::set<std::string> unsupported_notes_;
   int64_t idle_shifts_ = 0, preemptions_ = 0, warmup_reqs_ = 0, loads_ = 0, deliveries_ = 0, writebacks_ = 0;
+  int64_t oversized_reqs_ = 0;
 
   double uni() { return double(rng_() >> 11) * 0x1.0p-53; }
 
@@ -949,9 +951,23 @@ class Engine {
       r.hit_node = h.node;
       nodes_[h.node].pins++;
       lru_update(h.node);
+      // The whole prefix is needed for the load. An HBM ancestor of a host node
+      // would otherwise be evictable while ensure_free makes room for that node,
+      // increasing the bytes to reload after the capacity check.
+      std::vector<int32_t> ancestors;
+      for (int32_t n = nodes_[h.node].parent; n != -1; n = nodes_[n].parent) {
+        ancestors.push_back(n);
+        nodes_[n].pins++;
+        lru_update(n);
+      }
       int64_t lower_tok = 0;
       for (int32_t n = h.node; n != -1; n = nodes_[n].parent) if (nodes_[n].tier > 0) lower_tok += node_tokens(nodes_[n]);
-      if (!ensure_free(unit, 0, lower_tok)) return Admit::Blocked;
+      if (!ensure_free(unit, 0, lower_tok)) {
+        for (int32_t n : ancestors) unpin(n);
+        unpin(r.hit_node);
+        r.hit_node = -1;
+        return Admit::Blocked;
+      }
       double end = now_;
       RequestRecord& rec = records_[r.rec];
       std::vector<int64_t> per_tier(u.cap.size(), 0);
@@ -967,6 +983,7 @@ class Engine {
         x.tier = 0;
       }
       for (int32_t n = h.node; n != -1; n = nodes_[n].parent) lru_update(n);
+      for (int32_t n : ancestors) unpin(n);
       for (size_t t = 1; t < per_tier.size(); ++t) {
         if (per_tier[t] == 0) continue;
         double ms = tier_move_ms(unit, int(t), double(per_tier[t]) * pool_of_unit(unit).kv_bytes);
@@ -981,12 +998,19 @@ class Engine {
     }
     unpin(r.hit_node);
     r.hit_node = u.caches ? pin_hit(unit, r.play, h) : -1;
-    int64_t chunk = std::min(first_chunk, r.isl - hit_tokens + r.generated);
-    if (!ensure_free(unit, 0, chunk)) return Admit::Blocked;
+    const int64_t output_kv = std::max<int64_t>(0, r.generated - 1);
+    int64_t chunk = std::min(first_chunk, r.isl - hit_tokens + output_kv);
+    if (!ensure_free(unit, 0, chunk)) {
+      // A waiting request owns no allocation. Keeping its prefix pinned here
+      // can stop the running requests from freeing enough space to finish.
+      unpin(r.hit_node);
+      r.hit_node = -1;
+      return Admit::Blocked;
+    }
     r.hit_blocks = h.blocks;
     r.hit_tokens = hit_tokens;
     r.past = hit_tokens;
-    r.prefill_left = r.isl - hit_tokens + (r.generated > 0 ? r.generated : 0);
+    r.prefill_left = r.isl - hit_tokens + output_kv;
     RequestRecord& rec = records_[r.rec];
     if (!r.loaded && hit_tokens > 0) rec.tier_hits[tier_name(unit, 0)] += hit_tokens;
     rec.computed_prefill_tokens += r.prefill_left;
@@ -1022,7 +1046,7 @@ class Engine {
     unpin(r.hit_node);
     r.hit_node = -1;
     r.st = RState::Queued;
-    r.prefill_left = r.isl + r.generated;
+    r.prefill_left = r.isl + std::max<int64_t>(0, r.generated - 1);
     r.past = 0;
     u.waiting.push_front(id);
     preemptions_++;
@@ -1058,8 +1082,8 @@ class Engine {
       for (const Req& r : reqs_) if (r.st != RState::Done && r.st != RState::Pending) st[int(r.st)]++;
       int dq = 0, pw = 0;
       for (const Unit& u : units_) { dq += int(u.dec_waiting.size()); pw += int(u.waiting.size()); }
-      std::fprintf(stderr, "pass pool=%d t=%.3f total_ms=%.3f compute=%.3f membw=%.3f comm=%.3f queued=%d loading=%d prefill=%d delivering=%d decqueued=%d decode=%d dec_waiting=%d pf_waiting=%d sizes=%s\n",
-                   wk.pool, now_, total, res.compute_ms, res.membw_ms, res.comm_ms, st[1], st[2], st[3], st[4], st[5], st[6], dq, pw, sizes.c_str());
+      std::fprintf(stderr, "pass pool=%d t=%.3f total_ms=%.3f compute=%.3f membw=%.3f comm=%.3f queued=%d loading=%d prefill=%d delivering=%d decqueued=%d decode=%d dec_waiting=%d pf_waiting=%d sizes=%s preemptions=%lld\n",
+                   wk.pool, now_, total, res.compute_ms, res.membw_ms, res.comm_ms, st[1], st[2], st[3], st[4], st[5], st[6], dq, pw, sizes.c_str(), (long long)preemptions_);
     }
     wk.busy = true;
     wk.pass_start = now_;
@@ -1144,6 +1168,13 @@ class Engine {
           int32_t id = u.dec_waiting.front();
           Req& r = reqs_[id];
           const int64_t need = r.delivered + std::max<int64_t>(0, r.osl - 1);
+          if (need > u.cap[0]) {
+            u.dec_waiting.pop_front();
+            unpin(r.dec_hit_node);
+            r.dec_hit_node = -1;
+            reject(id);
+            continue;
+          }
           if (!ensure_free(uid, 0, need)) {
             wk.cap_blocked = true;
             break;
@@ -1172,6 +1203,11 @@ class Engine {
         }
         while (!u.waiting.empty() && budget > 0 && seqs < seq_cap) {
           int32_t id = u.waiting.front();
+          if (reqs_[id].isl + (pf_pool ? 0 : std::max<int64_t>(0, reqs_[id].osl - 1)) > u.cap[0]) {
+            u.waiting.pop_front();
+            reject(id);
+            continue;
+          }
           int64_t first_chunk = std::min(chunk_cap, budget);
           if (!stack_.chunked_prefill) first_chunk = std::numeric_limits<int64_t>::max();
           Admit a = admit_prefill(uid, id, first_chunk);
@@ -1185,14 +1221,41 @@ class Engine {
           if (!add_prefill_chunk(id)) break;
         }
       };
-      if (stack_.mix_prefill_decode) {
-        add_decodes();
-        add_prefills();
-      } else {
-        add_prefills();
-        bool has_prefill = false;
-        for (const auto& b : batch) if (b.prefill) has_prefill = true;
-        if (!has_prefill) add_decodes();
+      for (;;) {
+        list.clear();
+        batch.clear();
+        budget = tok_cap;
+        seqs = 0;
+        bool decoding = false;
+        for (int32_t id : u.running) if (reqs_[id].st == RState::Decode) decoding = true;
+        // SGLang --prefill-decode-interval / vLLM --prefill-schedule-interval: while decode is
+        // running, prefill is offered one turn out of every prefill_interval iterations.
+        const bool prefill_turn = stack_.prefill_interval <= 1 || !decoding || u.since_prefill + 1 >= stack_.prefill_interval;
+        bool scheduled_prefill = false;
+        if (stack_.prefill_interval > 1 && decoding) {
+          // The prefill turn gets the whole token budget. Mixing decode in first
+          // fills max_num_batched_tokens and the waiting prefills never start.
+          if (prefill_turn) add_prefills();
+          else add_decodes();
+          for (const auto& b : batch) if (b.prefill) scheduled_prefill = true;
+          if (list.empty()) add_decodes();
+        } else if (stack_.mix_prefill_decode) {
+          add_decodes();
+          add_prefills();
+        } else {
+          add_prefills();
+          bool has_prefill = false;
+          for (const auto& b : batch) if (b.prefill) has_prefill = true;
+          if (!has_prefill) add_decodes();
+        }
+        if (!list.empty()) u.since_prefill = scheduled_prefill ? 0 : u.since_prefill + 1;
+        // An empty rank with running requests and no load in flight means every running request is a prefill that
+        // cannot get its next chunk, and nothing else on the rank will free space: vLLM and SGLang preempt the
+        // youngest one (recomputed later) and the rank is formed again.
+        if (!list.empty() || u.running.empty() || u.loading > 0) break;
+        int32_t victim = u.running.back();
+        u.running.pop_back();
+        preempt(uid, victim);
       }
       if (!list.empty()) any = true;
     }
@@ -1320,6 +1383,23 @@ class Engine {
       }
       r.own_node = r.hit_node = -1;
     }
+    after_done(id);
+  }
+
+  // A request whose KV need exceeds the rank's whole pool can never be admitted: it is failed and counted so the
+  // point reports a capacity shortfall instead of stalling behind it.
+  void reject(int32_t id) {
+    Req& r = reqs_[id];
+    records_[r.rec].failed = true;
+    records_[r.rec].end_s = now_;
+    r.st = RState::Done;
+    active_reqs_--;
+    oversized_reqs_++;
+    after_done(id);
+  }
+
+  void after_done(int32_t id) {
+    Req& r = reqs_[id];
     Play& p = plays_[r.play];
     p.remaining--;
     p.in_flight--;
@@ -1371,6 +1451,8 @@ class Engine {
         if (e.b == XferLoad) {
           Unit& u = units_[r.unit];
           u.loading--;
+          unpin(r.hit_node);
+          r.hit_node = -1;
           r.st = RState::Queued;
           u.waiting.push_front(e.a);
           try_start_pass(u.worker);
@@ -1429,6 +1511,7 @@ class Engine {
     res.unlimited = unlimited_resources(fabric_);
     for (const Unit& u : units_) res.kv_pool_tokens += u.cap[0];
     res.extra["unsupported_passes"] = double(unsupported_passes_);
+    res.extra["oversized_requests"] = double(oversized_reqs_);
     if (unsupported_passes_ > 0) res.unsupported_note = unsupported_note_;
     res.extra["passes"] = double(passes);
     res.extra["rank_passes"] = double(rank_passes);

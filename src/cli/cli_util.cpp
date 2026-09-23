@@ -51,6 +51,7 @@ void apply_stack_override(StackSpec& s, const std::string& key, const std::strin
   else if (key == "kv_offload") s.kv_offload = b();
   else if (key == "kv_delivery") s.kv_delivery = value;
   else if (key == "mix_prefill_decode") s.mix_prefill_decode = b();
+  else if (key == "prefill_interval") s.prefill_interval = std::max(1, std::stoi(value));
   else if (key == "overlap_comm") s.overlap_comm = b();
   else if (key == "overlap_bulk") s.overlap_bulk = b();
   else if (key == "residency_limit_s") s.residency_limit_s = std::stod(value);

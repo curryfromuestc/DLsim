@@ -211,9 +211,10 @@ int cmd_sim(const Args& a) {
     write_file(a.get("records"), csv);
   }
   std::printf("%s\n", row.c_str());
-  std::fprintf(stderr, "wall %.2f s, requests %zu, unsupported passes %.0f of %.0f\n", o.wall_s, o.result.records.size(),
-               o.result.extra.count("unsupported_passes") ? o.result.extra.at("unsupported_passes") : 0.0,
-               o.result.extra.count("passes") ? o.result.extra.at("passes") : 0.0);
+  std::fprintf(stderr, "wall %.2f s, requests %zu, unsupported passes %.0f of %.0f, oversized requests %.0f\n", o.wall_s,
+               o.result.records.size(), o.result.extra.count("unsupported_passes") ? o.result.extra.at("unsupported_passes") : 0.0,
+               o.result.extra.count("passes") ? o.result.extra.at("passes") : 0.0,
+               o.result.extra.count("oversized_requests") ? o.result.extra.at("oversized_requests") : 0.0);
   if (!o.result.unsupported_note.empty()) std::fprintf(stderr, "first unsupported: %s\n", o.result.unsupported_note.c_str());
   return 0;
 }
@@ -223,6 +224,7 @@ struct PointEval {
   Metrics m;
   double wall_s = 0;
   double unsupported_passes = 0;
+  double oversized = 0;   // requests that could never fit a rank pool (capacity shortfall)
   std::map<std::string, double> err;   // relative errors per compared metric
 };
 
@@ -239,6 +241,7 @@ std::vector<PointEval> evaluate_points(const std::vector<BenchPoint>& pts, const
     e.m = o.metrics;
     e.wall_s = o.wall_s;
     e.unsupported_passes = o.result.extra.count("unsupported_passes") ? o.result.extra.at("unsupported_passes") : 0;
+    e.oversized = o.result.extra.count("oversized_requests") ? o.result.extra.at("oversized_requests") : 0;
     auto it = snap.find(p.id);
     if (it != snap.end()) {
       for (const auto& k : kCompareMetrics) {
@@ -254,8 +257,8 @@ std::vector<PointEval> evaluate_points(const std::vector<BenchPoint>& pts, const
     pending.pop_front();
     if (verbose) {
       auto it = snap.find(e.p.id);
-      std::printf("%d %s %s conc=%d wall=%.1fs unsupported=%.0f", e.p.id, e.p.hardware.c_str(), e.p.framework.c_str(), e.p.run.concurrency,
-                  e.wall_s, e.unsupported_passes);
+      std::printf("%d %s %s conc=%d wall=%.1fs unsupported=%.0f oversized=%.0f", e.p.id, e.p.hardware.c_str(), e.p.framework.c_str(),
+                  e.p.run.concurrency, e.wall_s, e.unsupported_passes, e.oversized);
       for (const auto& k : kCompareMetrics) {
         double pv = e.m.values.count(k) ? e.m.values.at(k) : NAN;
         double mv = it != snap.end() && it->second.metrics.count(k) ? it->second.metrics.at(k) : NAN;
@@ -280,7 +283,7 @@ std::string report_json(const std::vector<PointEval>& evals) {
     const auto& e = evals[i];
     if (i) s += ",";
     s += "{\"id\":" + std::to_string(e.p.id) + ",\"hardware\":\"" + e.p.hardware + "\",\"framework\":\"" + e.p.framework +
-         "\",\"conc\":" + std::to_string(e.p.run.concurrency) + ",\"wall_s\":" + std::to_string(e.wall_s) +
+         "\",\"conc\":" + std::to_string(e.p.run.concurrency) + ",\"wall_s\":" + std::to_string(e.wall_s) + ",\"oversized_requests\":" + std::to_string(e.oversized) +
          ",\"metrics\":" + metrics_json(e.m) + ",\"rel_err\":{";
     bool first = true;
     for (const auto& [k, v] : e.err) {

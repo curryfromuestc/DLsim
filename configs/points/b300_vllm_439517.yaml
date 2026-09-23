@@ -15,6 +15,7 @@ stack: configs/stack/vllm.yaml
 recipe: null
 calibration_anchor: 439877
 stack_overrides:
+  prefill_interval: 8
   max_num_seqs: 24
   max_num_batched_tokens: 16384
   mtp_nextn: 3
